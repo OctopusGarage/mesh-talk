@@ -481,14 +481,23 @@ impl ChannelState {
         author: String,
         epoch: u64,
         skd: &SenderKeyDistribution,
-    ) {
+    ) -> Result<(), ChannelError> {
         if epoch != self.epoch {
-            return;
+            return Ok(());
         }
-        self.sender_chains
+        let chain = self
+            .sender_chains
             .entry((author, epoch))
-            .and_modify(|chain| chain.refresh_distribution(skd))
             .or_insert_with(|| SenderChain::from_distribution(skd));
+        if skd.n.saturating_sub(chain.current_distribution().n) > mesh_e2ee::sender_key::MAX_SKIP {
+            let candidate = chain.prepare_rebase(skd).map_err(|_| {
+                ChannelError::Malformed("invalid receiver recovery checkpoint".into())
+            })?;
+            candidate.install(chain).map_err(|_| {
+                ChannelError::Malformed("stale receiver recovery checkpoint".into())
+            })?;
+        }
+        Ok(())
     }
 
     /// Seal `plaintext` with my current-epoch sender key. Wire = `u16 hdr_len ‖ hdr ‖ ct`,
@@ -599,7 +608,7 @@ impl ChannelState {
             .sender_chains
             .get_mut(&(hdr.sender.clone(), hdr.epoch))?;
         let prepared = chain.prepare_open(hdr.n, ct, hdr_bytes).ok()?;
-        Some(prepared.install(chain))
+        prepared.install(chain).ok()
     }
 }
 
@@ -1077,7 +1086,9 @@ mod tests {
                 .is_none()
         );
         let snapshot = source.current_receive_distributions().pop().unwrap().2;
-        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        target
+            .refresh_sender_chain(author.user_id(), 0, &snapshot)
+            .unwrap();
         let future = source.seal_sender_message(b"future").unwrap();
         assert_eq!(
             target
@@ -1096,8 +1107,12 @@ mod tests {
                 .is_none()
         );
         assert!(!target.has_my_sender(0));
-        target.refresh_sender_chain(author.user_id(), 0, &initial);
-        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        target
+            .refresh_sender_chain(author.user_id(), 0, &initial)
+            .unwrap();
+        target
+            .refresh_sender_chain(author.user_id(), 0, &snapshot)
+            .unwrap();
         assert_eq!(
             target
                 .open_sender_message(&author.user_id(), &skipped)
@@ -1141,7 +1156,9 @@ mod tests {
             .seal_sender_message(b"later ordinary message")
             .unwrap();
         let snapshot = source.current_receive_distributions().pop().unwrap().2;
-        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        target
+            .refresh_sender_chain(author.user_id(), 0, &snapshot)
+            .unwrap();
         assert_eq!(
             target
                 .open_sender_message(&author.user_id(), &later)

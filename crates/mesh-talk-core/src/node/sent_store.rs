@@ -88,6 +88,7 @@ impl SentStore {
             false,
         )
     }
+    #[cfg(test)]
     pub(crate) fn record(
         &mut self,
         conversation: ConversationId,
@@ -101,6 +102,43 @@ impl SentStore {
             wall_clock,
             plaintext: plaintext.to_vec(),
         })
+    }
+    /// Restore a bounded page into an unpublished profile, with each message
+    /// and its original event identity committed in the same transaction.
+    pub(super) fn record_recovered_page(
+        &mut self,
+        recovered: &super::recovered_sent_ids::IndexedRecoveredSentIds,
+        entries: &[(SentEntry, crate::eventlog::EventId)],
+    ) -> Result<(), LogError> {
+        self.repository.check_write()?;
+        recovered.check_recovery_write(&self.repository.profile)?;
+        let inserted = self
+            .repository
+            .profile
+            .database()
+            .transaction(|connection| {
+                let mut inserted = 0;
+                for (entry, id) in entries {
+                    inserted += usize::from(TranscriptRepository::put_on(
+                        connection,
+                        SENT,
+                        entry.conversation,
+                        &key(entry),
+                        entry.wall_clock,
+                        entry.seq,
+                        "",
+                        &entry.plaintext,
+                        false,
+                        false,
+                    )?);
+                    super::recovered_sent_ids::IndexedRecoveredSentIds::write_recovered_on(
+                        connection, entry, *id,
+                    )?;
+                }
+                Ok(inserted)
+            })?;
+        self.repository.note_committed_inserts(inserted);
+        Ok(())
     }
     pub(crate) fn maximum_sequence(&self, conversation: &ConversationId) -> Result<u64, LogError> {
         self.repository.maximum_sequence(conversation)
@@ -275,6 +313,10 @@ impl SentStore {
     ) -> Result<Vec<ConversationId>, LogError> {
         self.repository.conversation_page(after, limit)
     }
+    pub(in crate::node) fn has_deadlines(&self) -> Result<bool, LogError> {
+        self.repository.has_deadlines()
+    }
+
     pub(crate) fn deadline_page(
         &self,
         before: Option<u64>,

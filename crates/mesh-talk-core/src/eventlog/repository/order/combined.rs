@@ -124,13 +124,99 @@ impl EventRepository {
         row: HistorySelector,
         deadline: Option<u64>,
     ) -> Result<(), LogError> {
-        self.database.transaction(|c|{
-            let scope:Option<i64>=c.query_row("SELECT s.lifecycle FROM retained_events e JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE e.domain=?1 AND e.id=?2 AND e.conversation=?3",params![self.domain.0.as_slice(),row.id.as_bytes().as_slice(),conv.as_bytes().as_slice()],|r|r.get(0)).optional()?;
-            if scope.is_some_and(|state|state!=0){return Ok(());}
-            let exists:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM history_order_jobs WHERE domain=?1 AND conversation=?2 AND job=?3 AND ready=0)",params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),job.as_slice()],|r|r.get(0))?;
-            if !exists{return Err(LogError::StaleCursor);}
-            c.execute("INSERT INTO history_order_candidates VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(job,id) DO UPDATE SET clock=excluded.clock,source_kind=excluded.source_kind,ordinal=excluded.ordinal,priority=excluded.priority,sequence=excluded.sequence,charged_bytes=excluded.charged_bytes,archive=excluded.archive WHERE (excluded.priority,excluded.clock,excluded.sequence,excluded.ordinal)<(priority,clock,sequence,ordinal)",params![job.as_slice(),row.id.as_bytes().as_slice(),row.clock.to_be_bytes().as_slice(),row.source_kind,row.ordinal,row.priority,row.sequence.to_be_bytes().as_slice(),integer(row.charged_bytes)?,i64::from(scope.is_none())])?;
-            if let Some(deadline)=deadline {c.execute("UPDATE history_order_jobs SET next_deadline=?2 WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",params![job.as_slice(),deadline.to_be_bytes().as_slice()])?;}
+        self.history_add_page(conv, job, &[(row, deadline)])
+    }
+
+    /// Commit one bounded page of metadata to an unfinished generation.
+    pub(crate) fn history_add_page(
+        &self,
+        conv: &ConversationId,
+        job: [u8; 16],
+        rows: &[(HistorySelector, Option<u64>)],
+    ) -> Result<(), LogError> {
+        if rows.len() > 128 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        self.database.transaction(|connection| {
+            let mut scope = connection.prepare_cached(
+                "SELECT s.lifecycle FROM retained_events e
+                 JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation
+                 WHERE e.domain=?1 AND e.id=?2 AND e.conversation=?3",
+            )?;
+            let mut unfinished = connection.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM history_order_jobs
+                 WHERE domain=?1 AND conversation=?2 AND job=?3 AND ready=0)",
+            )?;
+            let mut insert = connection.prepare_cached(
+                "INSERT INTO history_order_candidates VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 ON CONFLICT(job,id) DO UPDATE SET clock=excluded.clock,
+                    source_kind=excluded.source_kind,ordinal=excluded.ordinal,
+                    priority=excluded.priority,sequence=excluded.sequence,
+                    charged_bytes=excluded.charged_bytes,archive=excluded.archive
+                 WHERE (excluded.priority,excluded.clock,excluded.sequence,excluded.ordinal)
+                    <(priority,clock,sequence,ordinal)",
+            )?;
+            let mut checked_generation = false;
+            let mut earliest_deadline = None;
+            for &(row, deadline) in rows {
+                let lifecycle: Option<i64> = scope
+                    .query_row(
+                        params![
+                            self.domain.0.as_slice(),
+                            row.id.as_bytes().as_slice(),
+                            conv.as_bytes().as_slice()
+                        ],
+                        |result| result.get(0),
+                    )
+                    .optional()?;
+                if lifecycle.is_some_and(|state| state != 0) {
+                    continue;
+                }
+                // All candidates share this generation and transaction. Keep the
+                // check after filtering so an entirely ineligible page is a no-op.
+                if !checked_generation {
+                    let exists: bool = unfinished.query_row(
+                        params![
+                            self.domain.0.as_slice(),
+                            conv.as_bytes().as_slice(),
+                            job.as_slice()
+                        ],
+                        |result| result.get(0),
+                    )?;
+                    if !exists {
+                        return Err(LogError::StaleCursor);
+                    }
+                    checked_generation = true;
+                }
+                insert.execute(params![
+                    job.as_slice(),
+                    row.id.as_bytes().as_slice(),
+                    row.clock.to_be_bytes().as_slice(),
+                    row.source_kind,
+                    row.ordinal,
+                    row.priority,
+                    row.sequence.to_be_bytes().as_slice(),
+                    integer(row.charged_bytes)?,
+                    i64::from(lifecycle.is_none())
+                ])?;
+                if let Some(deadline) = deadline {
+                    earliest_deadline = Some(
+                        earliest_deadline.map_or(deadline, |earliest: u64| earliest.min(deadline)),
+                    );
+                }
+            }
+            if let Some(deadline) = earliest_deadline {
+                connection
+                    .prepare_cached(
+                        "UPDATE history_order_jobs SET next_deadline=?2
+                     WHERE job=?1 AND (next_deadline IS NULL OR next_deadline>?2)",
+                    )?
+                    .execute(params![job.as_slice(), deadline.to_be_bytes().as_slice()])?;
+            }
             Ok(())
         })
     }
@@ -139,6 +225,9 @@ impl EventRepository {
             type HistoryJobRow = (bool,Option<Vec<u8>>,i64,Vec<u8>,Vec<u8>,i64);
             let (ready,signed,mut signed_rank,mut clock,mut archive,mut rank):HistoryJobRow=c.query_row("SELECT ready,signed_job,signed_rank,archive_clock,archive_id,next_rank FROM history_order_jobs WHERE job=?1",[job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
             if ready{return Ok(HistoryGeneration{job,ready:true,count:usize::try_from(rank).map_err(|_|LogError::RepositoryCounterExhausted)?});}
+            if signed.is_none() {
+                return rank_unsigned_history_page(c, job, &clock, &archive, rank);
+            }
             let mut done=false;
             for _ in 0..128 {
                 let signed_head:Option<(Vec<u8>,Vec<u8>,i64)>=if let Some(signed)=&signed {c.query_row("SELECT e.wall_clock,e.id,r.rank FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank>?3 ORDER BY r.rank LIMIT 1",params![self.domain.0.as_slice(),signed,signed_rank],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?}else{None};
@@ -232,4 +321,46 @@ impl EventRepository {
             Ok(result)
         })
     }
+}
+
+fn rank_unsigned_history_page(
+    transaction: &rusqlite::Transaction<'_>,
+    job: [u8; 16],
+    clock: &[u8],
+    id: &[u8],
+    rank: i64,
+) -> Result<HistoryGeneration, LogError> {
+    const PAGE_ROWS: usize = 128;
+    let inserted = transaction.execute(
+        "INSERT INTO history_order_rows(job,rank,id)
+         SELECT ?1, ?4 + (row_number() OVER (ORDER BY clock,id) - 1), id
+         FROM (SELECT clock,id FROM history_order_candidates
+               WHERE job=?1 AND (clock,id)>(?2,?3) ORDER BY clock,id LIMIT ?5)",
+        params![job.as_slice(), clock, id, rank, integer(PAGE_ROWS)?],
+    )?;
+    let next_rank = rank
+        .checked_add(integer(inserted)?)
+        .ok_or(LogError::RepositoryCounterExhausted)?;
+    let ready = inserted < PAGE_ROWS;
+    // Read back the last ordered candidate by its exact rank. Commit its cursor
+    // with the batch so a failed transaction cannot skip any candidates.
+    transaction.execute(
+        "UPDATE history_order_jobs
+         SET ready=?2, next_rank=?3,
+             (archive_clock,archive_id)=(
+                 SELECT clock,id FROM history_order_candidates
+                 WHERE ?4>0 AND job=?1 AND id=(
+                     SELECT id FROM history_order_rows WHERE job=?1 AND rank=?3-1
+                 )
+                 UNION ALL SELECT archive_clock,archive_id WHERE ?4=0
+                 LIMIT 1
+             )
+         WHERE job=?1",
+        params![job.as_slice(), ready, next_rank, integer(inserted)?],
+    )?;
+    Ok(HistoryGeneration {
+        job,
+        ready,
+        count: usize::try_from(next_rank).map_err(|_| LogError::RepositoryCounterExhausted)?,
+    })
 }

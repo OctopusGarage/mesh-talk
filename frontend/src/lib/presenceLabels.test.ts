@@ -14,7 +14,8 @@ const templates = {
 
 it.each(SUPPORTED_LANGUAGES)(
   "%s presence counts remain client-relative for every plural form",
-  (language) => {
+  async (language) => {
+    await i18n.loadLanguages(language);
     const t = i18n.getFixedT(language);
     for (const count of [0, 1, 2]) {
       expect(t("sidebar.peopleOnLan", { count })).toBe(

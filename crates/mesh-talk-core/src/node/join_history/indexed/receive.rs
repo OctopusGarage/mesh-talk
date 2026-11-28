@@ -206,6 +206,9 @@ impl Node {
         }
         for index in inserted {
             let (row, metadata, _) = &candidates[index];
+            if !reopening {
+                crate::node::received_store::note_message_reception(row, metadata, true, None);
+            }
             if !metadata.own_device {
                 self.note_account_local_change();
             }

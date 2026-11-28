@@ -874,7 +874,7 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
       const erasedHistory = (): string[] =>
         JSON.parse(localStorage.getItem(`mock-erased-${contactOwner}`) ?? "[]");
       const ok = () => null;
-      const probedEndpoints: string[] = [];
+      const probedEndpoints: { host: string; port?: number }[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
       let deferredCommand: string | null = null;
@@ -2736,7 +2736,10 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
           diag_network_info: () => networkInfo,
           rescan_peers: ok,
           probe_peer_endpoint: (a) => {
-            probedEndpoints.push(String(a.host));
+            probedEndpoints.push({
+              host: String(a.host),
+              port: a.port as number | undefined,
+            });
             return null;
           },
           set_badge: ok,

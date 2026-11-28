@@ -1,12 +1,12 @@
 // Same-workflow reuse only: download-artifact must use the current run, and the
-// consumer must match its source, workflow, run and rerun attempt before reuse.
+// consumer must match its source, workflow and run; producer attempts may be earlier.
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const [mode, input, output] = process.argv.slice(2);
-if (!["seal", "restore"].includes(mode) || !input || !output) {
-  throw new Error("Usage: unit-coverage-artifact.mjs seal|restore <input> <output>");
+if (!["seal", "restore", "restore-latest"].includes(mode) || !input || !output) {
+  throw new Error("Usage: unit-coverage-artifact.mjs seal|restore|restore-latest <input> <output>");
 }
 const identity = {
   schemaVersion: 1,
@@ -23,7 +23,29 @@ if (!/^[a-f0-9]{40}$/.test(identity.sourceSha || "") || !identity.workflow ||
     !/^[1-9]\d*$/.test(identity.runId || "") || !/^[1-9]\d*$/.test(identity.runAttempt || "")) {
   throw new Error("Complete GitHub source and run identity is required for unit coverage reuse");
 }
-const lcov = await readFile(mode === "seal" ? input : resolve(input, "lcov.info"));
+let artifact = input;
+if (mode === "restore-latest") {
+  const entries = await readdir(input);
+  if (entries.includes("provenance.json")) {
+    // download-artifact v8 flattens a single match even with merge-multiple=false.
+    if (entries.length !== 2 || !entries.includes("lcov.info")) throw new Error("Unexpected unit coverage artifact files");
+    const manifest = JSON.parse(await readFile(resolve(input, "provenance.json"), "utf8"));
+    if (!/^[1-9]\d*$/.test(manifest.runAttempt || "") || BigInt(manifest.runAttempt) > BigInt(identity.runAttempt)) throw new Error("Invalid producer attempt");
+    identity.runAttempt = manifest.runAttempt;
+  } else {
+    const prefix = `ui-unit-coverage-${identity.sourceSha}-${identity.runId}-`;
+    const attempts = (await readdir(input)).map(name => {
+      if (!name.startsWith(prefix)) throw new Error("Unexpected unit coverage artifact");
+      const attempt = name.slice(prefix.length);
+      if (!/^[1-9]\d*$/.test(attempt) || BigInt(attempt) > BigInt(identity.runAttempt)) throw new Error("Invalid producer attempt");
+      return { name, attempt };
+    }).sort((a, b) => BigInt(a.attempt) < BigInt(b.attempt) ? 1 : -1);
+    if (!attempts.length) throw new Error("Missing unit coverage producer artifact");
+    artifact = resolve(input, attempts[0].name);
+    identity.runAttempt = attempts[0].attempt;
+  }
+}
+const lcov = await readFile(mode === "seal" ? input : resolve(artifact, "lcov.info"));
 const sha256 = createHash("sha256").update(lcov).digest("hex");
 if (!/^SF:.+$/m.test(lcov.toString()) || !/^DA:[1-9]\d*,\d+/m.test(lcov.toString())) {
   throw new Error("Unit coverage has no measured source lines");
@@ -33,7 +55,7 @@ if (mode === "seal") {
   await writeFile(resolve(output, "lcov.info"), lcov);
   await writeFile(resolve(output, "provenance.json"), `${JSON.stringify({ ...identity, sha256 }, null, 2)}\n`);
 } else {
-  const manifest = JSON.parse(await readFile(resolve(input, "provenance.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(resolve(artifact, "provenance.json"), "utf8"));
   for (const [key, value] of Object.entries({ ...identity, sha256 })) {
     if (manifest?.[key] !== value) throw new Error(`Coverage provenance mismatch: ${key}`);
   }

@@ -86,7 +86,9 @@ it("coalesces bursts and refreshes only the invalidated group's members", async 
     Array.from({ length: 20 }, () => s.refresh.request("team")),
   );
   expect(s.commands.listChannels).toHaveBeenCalledOnce();
-  expect(s.commands.channelMembers).toHaveBeenCalledExactlyOnceWith("team");
+  expect(s.commands.channelMembers).toHaveBeenCalledExactlyOnceWith("team", {
+    includeAccountAccess: false,
+  });
 });
 
 it("retains one follow-up when a group changes during an active refresh", async () => {
@@ -196,7 +198,9 @@ it("repairs missed group invalidations when fallback becomes due during a target
   const fallback = s.refresh.ifDue();
   pending.resolve({ history_policy: "off", owner: "alice", members: [] });
   await Promise.all([targeted, fallback]);
-  expect(s.commands.channelMembers).toHaveBeenCalledWith("other");
+  expect(s.commands.channelMembers).toHaveBeenCalledWith("other", {
+    includeAccountAccess: false,
+  });
 });
 
 it("publishes healthy members and recovers after a member read never settles", async () => {

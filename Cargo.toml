@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
+members = ["crates/mesh-talk-protocol", "crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
 resolver = "3"
 
 # Layered workspace:
-#   crates/mesh-talk-core — the UI-free protocol core (the SDK foundation)
+#   crates/mesh-talk-core — the UI-free Mesh Talk application protocol core
 #   crates/mesh-talk-integrations — scoped local service and dedicated bot host
 #   crates/mesh-talk-mcp   — MCP adapter over the local service
 #   src-tauri             — the Tauri desktop app, a thin shell over the core

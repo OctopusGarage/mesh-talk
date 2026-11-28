@@ -333,7 +333,9 @@ impl Node {
                     ChannelReceptionRole::File,
                     metadata,
                 )?;
-                if !ReceivedStore::install_file_on(c, &entry, event, Some(&metadata))? {
+                let (inserted, manifest) =
+                    ReceivedStore::install_file_on(c, &entry, event, Some(&metadata))?;
+                if !inserted {
                     return Ok(None);
                 }
                 ChannelCheckpointStore::install_batch_on(
@@ -342,7 +344,7 @@ impl Node {
                     ChannelReceptionRole::File,
                     &metadata,
                 )?;
-                Ok(Some(metadata))
+                Ok(Some((metadata, manifest)))
             })?;
             received.note_channel_commit(usize::from(installed.is_some()));
             installed
@@ -352,14 +354,19 @@ impl Node {
             // Refresh current file state even when no arrival fact is created.
             self.note_file_change();
         }
-        let Some(metadata) = committed else {
+        let Some((metadata, manifest)) = committed else {
             return Ok(());
         };
         self.note_reception_change();
         if !metadata.own_device {
             self.note_account_local_change();
         }
-        let manifest = validated_manifest(&entry.plaintext).expect("validated retained manifest");
+        crate::node::received_store::note_message_reception(
+            &entry,
+            &metadata,
+            true,
+            Some(&manifest),
+        );
         self.remember_manifest_scope(
             manifest.file_conv(),
             entry.conversation,

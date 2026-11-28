@@ -23,6 +23,8 @@ pub(crate) struct AccountLogin {
     /// Explicit source consent to enable all five categories once for this revision.
     #[serde(default)]
     pub(crate) sync_all: bool,
+    #[serde(default)]
+    pub(crate) security: Option<mesh_talk_core::identity::account_security::AccountSecurityPolicy>,
 }
 impl Drop for AccountLogin {
     fn drop(&mut self) {
@@ -40,6 +42,11 @@ impl AccountLogin {
             return Err(CommandError::Validation(
                 "Unsupported private account login record".into(),
             ));
+        }
+        if let Some(policy) = &value.security {
+            policy
+                .validate()
+                .map_err(|e| CommandError::Validation(e.into()))?;
         }
         Ok(value)
     }
@@ -123,9 +130,35 @@ pub(crate) fn initialize_source(
         && policy.profile
         && policy.appearance
         && policy.contacts;
+    let info = app
+        .session()
+        .matching(admission.lease(), |info| info.clone())
+        .map_err(CommandError::Authorization)?;
+    let security = app
+        .auth_service()
+        .identity_manager()
+        .export_account_security(&info.user.name, &info.password)
+        .map_err(|e| CommandError::Service(e.to_string()))?
+        .into_policy();
     let mut value = if let Some(snapshot) = runtime.handle().account_access_snapshot() {
+        if snapshot.account_id() != runtime.account_id() {
+            return Err(CommandError::Authorization(
+                "Security source account mismatch".into(),
+            ));
+        }
         let value = AccountLogin::decode(&snapshot)?;
-        if value.sync_all == sync_all {
+        if let Some(published) = &value.security
+            && (published.generation > security.generation
+                || (published.generation == security.generation
+                    && serde_json::to_vec(published).ok() != serde_json::to_vec(&security).ok()))
+        {
+            return Err(CommandError::Service(
+                "Conflicting or newer published security policy".into(),
+            ));
+        }
+        if value.sync_all == sync_all
+            && serde_json::to_vec(&value.security).ok() == serde_json::to_vec(&Some(&security)).ok()
+        {
             return Ok(());
         }
         // A device preparing a code may still have stale local credentials.
@@ -141,9 +174,11 @@ pub(crate) fn initialize_source(
             login_name: info.user.login_name().into(),
             password: info.account_login_password.clone(),
             sync_all,
+            security: None,
         }
     };
     value.sync_all = sync_all;
+    value.security = Some(security);
     let bytes = Zeroizing::new(
         serde_json::to_vec(&value)
             .map_err(|_| CommandError::Internal("Unable to prepare account login".into()))?,
@@ -230,7 +265,7 @@ fn install_with_policy(
             "Account login belongs to another account".into(),
         ));
     }
-    let value = AccountLogin::decode(snapshot)?;
+    let mut value = AccountLogin::decode(snapshot)?;
     let stamp_path = path(
         root,
         admission.lease().owner(),
@@ -249,9 +284,10 @@ fn install_with_policy(
         return Ok(None);
     }
     let manager = app.auth_service().identity_manager();
+    let security_lock_revision = app.app_lock().authorization_revision()?;
     let authorize = |commit: &mut dyn FnMut() -> Result<(), IdentityError>| {
         admission
-            .checked(runtime, || Ok(commit()))
+            .checked_at_lock_revision(runtime, security_lock_revision, || Ok(commit()))
             .map_err(|_| IdentityError::StorageError("Account login session replaced".into()))?
     };
     let adoption_path = path(
@@ -299,6 +335,38 @@ fn install_with_policy(
                 "Unable to apply shared account login; existing local data was preserved".into(),
             )
         })?;
+    }
+    if let Some(policy) = value.security.take() {
+        (|| {
+            let current = manager
+                .export_account_security(&info.user.name, &info.password)
+                .map_err(|e| CommandError::Service(e.to_string()))?;
+            let local = serde_json::to_vec(&current.into_policy())
+                .map_err(|e| CommandError::Internal(e.to_string()))?;
+            let incoming =
+                serde_json::to_vec(&policy).map_err(|e| CommandError::Internal(e.to_string()))?;
+            let current = manager
+                .export_account_security(&info.user.name, &info.password)
+                .map_err(|e| CommandError::Service(e.to_string()))?;
+            if policy.generation == current.generation {
+                if local != incoming {
+                    return Err(CommandError::Service(
+                        "Conflicting account security policy".into(),
+                    ));
+                }
+            } else {
+                manager
+                    .import_account_security_if(
+                        &info.user.name,
+                        &info.password,
+                        current.generation,
+                        policy.into_state(),
+                        authorize,
+                    )
+                    .map_err(|e| CommandError::Service(e.to_string()))?;
+            }
+            Ok::<(), CommandError>(())
+        })()?;
     }
     let user = admission.update_session(runtime, |current| {
         // The namespace lock has been released before reentering session authority.

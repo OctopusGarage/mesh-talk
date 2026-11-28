@@ -196,6 +196,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         ),
                     )),
                 );
+                let profile_changes = runtime.handle().subscribe_own_account_profile_changes();
                 runtime.register_graceful_host_task(
                     profile_shutdown,
                     tokio::spawn(after_install(
@@ -205,6 +206,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             authority.clone(),
                             integration_state.clone(),
                             node_handle.clone(),
+                            profile_changes,
                             profile_stopping,
                         ),
                     )),
@@ -221,6 +223,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         authority.clone(),
                         runtime.account_id().to_owned(),
                         runtime.user_id().to_owned(),
+                        handle.bounded_delivery().then(|| reception_scope.clone()),
                         observed,
                         ui_changes,
                     ),
@@ -237,6 +240,8 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             runtime.account_id().to_owned(),
                             runtime.user_id().to_owned(),
                             kind,
+                            (kind == "roster" && handle.bounded_delivery())
+                                .then(|| reception_scope.clone()),
                             changes,
                         ),
                     )));
@@ -380,11 +385,25 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
     authority: RuntimeAuthority,
     state: crate::state::AppState,
     node: crate::chat_commands::NodeState,
+    mut changes: tokio::sync::watch::Receiver<()>,
     mut stopping: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    use tokio::time::{Duration, Instant, sleep_until};
+
+    const REPAIR: Duration = Duration::from_secs(300);
+    const RETRY: Duration = Duration::from_millis(500);
+    let mut next = Instant::now();
     loop {
-        tokio::select! { _ = &mut stopping => return, _ = interval.tick() => {} }
+        tokio::select! {
+            biased;
+            _ = &mut stopping => return,
+            changed = changes.changed() => if changed.is_err() { return; },
+            _ = sleep_until(next) => {},
+        }
+        // Reconcile the latest committed value after a burst. Arrivals during
+        // the read or the owned credential write retain a follow-up wake.
+        changes.borrow_and_update();
+        next = Instant::now() + REPAIR;
         let auth = tokio::select! {
             _ = &mut stopping => return,
             auth = state.auth_operation.clone().lock_owned() => auth,
@@ -400,6 +419,7 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
                 log::warn!(
                     "Account profile reconciliation deferred after storage failure: {error}"
                 );
+                next = Instant::now() + RETRY;
                 continue;
             }
         };
@@ -443,6 +463,8 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
                     serde_json::json!({"user": crate::commands::UserInfo::from(user), "account_id": identity.0, "device_id": identity.1}),
                 );
             });
+        } else {
+            next = Instant::now() + RETRY;
         }
     }
 }
@@ -496,6 +518,7 @@ async fn forward_ui_changes<R: tauri::Runtime>(
     authority: RuntimeAuthority,
     account: String,
     device: String,
+    reception_scope: Option<crate::reception_host::Scope>,
     mut observed: mesh_talk_core::node::DesktopUiRevisions,
     mut changes: tokio::sync::watch::Receiver<mesh_talk_core::node::DesktopUiRevisions>,
 ) {
@@ -504,20 +527,22 @@ async fn forward_ui_changes<R: tauri::Runtime>(
         let current = *changes.borrow_and_update();
         let documents = current.documents != observed.documents;
         let status = current.sync_status != observed.sync_status;
-        let kinds: &[&'static str] = if current.state != observed.state {
-            &["state"]
+        let receipts = current.read_receipts != observed.read_receipts;
+        let received = current.reception != observed.reception;
+        let kinds = if current.state != observed.state || (received && reception_scope.is_none()) {
+            [Some("state"), None, None]
         } else {
-            match (documents, status) {
-                (true, true) => &["documents", "sync_status"],
-                (true, false) => &["documents"],
-                (false, true) => &["sync_status"],
-                (false, false) => &[],
-            }
+            [
+                documents.then_some("documents"),
+                status.then_some("sync_status"),
+                (receipts && !documents).then_some("read_receipts"),
+            ]
         };
         // A later revision during emission remains ready on the next changed().
         // Broad state covers both narrow domains in this captured batch only.
         observed = current;
-        for &kind in kinds {
+        let has_state_change = kinds.iter().any(Option::is_some);
+        for kind in kinds.into_iter().flatten() {
             if authority
                 .current(|_| {
                     crate::events::emit_node_state_changed(
@@ -535,6 +560,15 @@ async fn forward_ui_changes<R: tauri::Runtime>(
                 return;
             }
         }
+        if received
+            && !has_state_change
+            && let Some(scope) = reception_scope.as_ref()
+            && authority
+                .current(|_| crate::reception_host::wake(&app, scope))
+                .is_err()
+        {
+            return;
+        }
     }
 }
 
@@ -544,6 +578,7 @@ async fn forward_state_changes<R: tauri::Runtime>(
     account: String,
     device: String,
     kind: &'static str,
+    roster_scope: Option<crate::reception_host::Scope>,
     mut changes: tokio::sync::watch::Receiver<u64>,
 ) {
     while changes.changed().await.is_ok() {
@@ -556,6 +591,16 @@ async fn forward_state_changes<R: tauri::Runtime>(
         changes.borrow_and_update();
         if authority
             .current(|_| {
+                if let Some(scope) = &roster_scope {
+                    // Renewals describe current presence. The next renewal or
+                    // startup snapshot repairs a lost hint without a receipt.
+                    if !crate::app_lock::app_locked(&app)
+                        && let Err(error) = app.emit("node-roster-changed", scope)
+                    {
+                        log::warn!("Failed to emit roster invalidation: {error}");
+                    }
+                    return;
+                }
                 crate::events::emit_node_state_changed(
                     &app,
                     crate::events::NodeStateChangedEvent {
@@ -966,6 +1011,7 @@ mod tests {
             authority.clone(),
             state.clone(),
             node.clone(),
+            handle.subscribe_own_account_profile_changes(),
             stopping,
         ));
         assert!(
@@ -1369,14 +1415,17 @@ mod tests {
                 authority.clone(),
                 "account".into(),
                 "device".into(),
+                None,
                 observed,
                 receiver,
             ),
         ));
         changes.send_replace(DesktopUiRevisions {
             state: 1,
+            reception: 0,
             documents: 1,
             sync_status: 1,
+            read_receipts: 1,
         });
         tokio::task::yield_now().await;
         assert!(received.try_recv().is_err());
@@ -1388,10 +1437,10 @@ mod tests {
         assert_eq!(event, "state");
         assert!(received.try_recv().is_err());
         changes.send_modify(|current| {
-            current.documents += 1;
+            current.read_receipts += 1;
             current.sync_status += 1;
         });
-        for expected in ["documents", "sync_status"] {
+        for expected in ["sync_status", "read_receipts"] {
             assert_eq!(
                 tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
                     .await
@@ -1439,6 +1488,7 @@ mod tests {
             "account".into(),
             "device".into(),
             "files",
+            None,
             receiver,
         ));
         for generation in 1..=100 {
@@ -1457,6 +1507,63 @@ mod tests {
             RuntimeAuthority::request(session, authority.lease.clone(), node).unwrap();
         changes.send_replace(101);
         tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn roster_watch_coalesces_outside_reception_and_rejects_retired_authority() {
+        let (session, node, authority) = authority();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        for name in [
+            "node-roster-changed",
+            "node-reception-wake",
+            "node-state-changed",
+        ] {
+            let events = events.clone();
+            app.listen(name, move |event| {
+                let payload = serde_json::from_str::<serde_json::Value>(event.payload()).unwrap();
+                let _ = events.send((name, payload));
+            });
+        }
+        let scope = crate::reception_host::Scope {
+            owner: authority.lease.owner().to_owned(),
+            account_id: "account".into(),
+            device_id: "device".into(),
+            runtime_id: authority.runtime_id().unwrap(),
+        };
+        let reception = crate::reception_host::ReceptionHostState::default();
+        reception.install(scope.clone());
+        app.manage(reception);
+        let expected = serde_json::to_value(&scope).unwrap();
+        let (changes, receiver) = tokio::sync::watch::channel(0);
+        let task = tokio::spawn(forward_state_changes(
+            app.handle().clone(),
+            authority.clone(),
+            scope.account_id.clone(),
+            scope.device_id.clone(),
+            "roster",
+            Some(scope),
+            receiver,
+        ));
+        for generation in 1..=100 {
+            changes.send_replace(generation);
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+                .await
+                .unwrap(),
+            Some(("node-roster-changed", expected))
+        );
+        let _replacement =
+            RuntimeAuthority::request(session, authority.lease.clone(), node).unwrap();
+        changes.send_replace(101);
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
             .await
             .unwrap()
             .unwrap();

@@ -30,6 +30,8 @@ export interface LogoutResult {
 }
 
 export interface PeerInfo {
+  /** Current public presence; absent only with an older desktop backend. */
+  online?: boolean;
   user_id: string;
   name: string;
   addr: string;
@@ -320,6 +322,7 @@ export interface DiagPeerInfo {
   post_office: boolean;
   account_id: string | null;
   last_seen_secs: number;
+  routed_latency?: { round_trip_ms: number; age_secs: number } | null;
 }
 
 export interface DiagNetworkInfo {
@@ -416,6 +419,7 @@ export interface AppSettings {
   /** Preset name; custom means individual privacy controls differ from a preset. */
   privacy_level: "balanced" | "private" | "strict" | "custom";
   notification_preview: boolean;
+  muted_groups?: string[];
   auto_lock_seconds: number;
   lock_when_hidden: boolean;
   confirm_sensitive_copy: boolean;
@@ -432,6 +436,8 @@ export interface EnvInfo {
   arch: string;
   target: string;
   build_profile: string;
+  desktop_ready_ms?: number | null;
+  initial_interface_ms?: number | null;
 }
 
 export type UpdateChannel = "stable" | "nightly";
@@ -626,6 +632,8 @@ export interface PrivacySnapshot {
   owner: string;
   version: number;
   invisible: boolean;
+  contacts_only?: boolean;
+  blocked_accounts?: string[];
   allowed_accounts: {
     id: string;
     name: string;
@@ -638,7 +646,14 @@ export interface NodeStateChangedEvent {
   owner: string;
   account_id: string;
   device_id: string;
-  kind: "state" | "roster" | "delivery" | "files" | "documents" | "sync_status";
+  kind:
+    | "state"
+    | "roster"
+    | "delivery"
+    | "files"
+    | "documents"
+    | "sync_status"
+    | "read_receipts";
 }
 
 export interface PresenceDelta {
@@ -660,14 +675,21 @@ export interface PendingStickerSourcesPage {
   next_cursor: string | null;
 }
 
+/** Identity returned by queries admitted to a specific desktop runtime. */
+export interface NodeIdentity {
+  owner: string;
+  device_id: string;
+  account_id: string;
+  display_name?: string;
+  history_revision?: number;
+  supports_push_state?: boolean;
+  supports_bounded_delivery?: boolean;
+  runtime_id?: string | null;
+}
+
 /** Authorized source identity accompanying a single roster observation. */
 export interface RosterObservation {
-  identity: {
-    owner: string;
-    account_id: string;
-    device_id: string;
-    runtime_id?: string | null;
-  };
+  identity: NodeIdentity;
   peers: PeerInfo[];
   people: PresenceMap;
 }

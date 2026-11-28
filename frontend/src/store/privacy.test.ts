@@ -15,6 +15,31 @@ beforeEach(() => {
   usePrivacy.getState().reset();
 });
 describe("invisible-mode session policy", () => {
+  it("updates personal privacy only after an owner-bound acknowledgement", async () => {
+    const initial = {
+      ...snapshot(),
+      version: 2,
+      contacts_only: false,
+      blocked_accounts: [],
+    };
+    invoke.mockResolvedValueOnce(initial);
+    await usePrivacy.getState().load("alice");
+    invoke.mockResolvedValueOnce({ ...initial, blocked_accounts: [bob] });
+    expect(await usePrivacy.getState().setPersonal("alice", bob, true)).toBe(
+      true,
+    );
+    expect(invoke).toHaveBeenLastCalledWith("set_personal_privacy", {
+      owner: "alice",
+      account: bob,
+      enabled: true,
+    });
+    expect(usePrivacy.getState().snapshot?.blocked_accounts).toEqual([bob]);
+    invoke.mockRejectedValueOnce(new Error("write failed"));
+    expect(await usePrivacy.getState().setPersonal("alice", null, true)).toBe(
+      false,
+    );
+    expect(usePrivacy.getState().snapshot?.contacts_only).toBe(false);
+  });
   it("exposes a stalled privacy read for retry and ignores its late snapshot", async () => {
     vi.useFakeTimers();
     let finish!: (value: unknown) => void;

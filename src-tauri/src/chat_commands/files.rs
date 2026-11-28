@@ -247,29 +247,39 @@ pub async fn send_file_dm<R: tauri::Runtime>(
     path: String,
     media: bool,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&session, &state)?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let node = runtime.handle();
-                // The legacy DM command has no optimistic message key; retain its recipient key.
-                let mut prog =
-                    crate::events::ProgressThrottle::new(app.clone(), recipient.clone(), "prepare");
-                let result = node
-                    .send_file_dm_progress_if(
-                        &recipient,
-                        std::path::Path::new(&path),
-                        file_kind(media),
-                        move |p| prog.emit(p.done, p.total),
-                        |commit| admission.authorize_accept(runtime, commit),
-                    )
-                    .await;
-                cleanup_pasted_file(&app, &path);
-                let id = result.map_err(CommandError::from)?;
-                Ok(hex::encode(id.as_bytes()))
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&session, &state)?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let node = runtime.handle();
+                    // The legacy DM command has no optimistic message key; retain its recipient key.
+                    let mut prog = crate::events::ProgressThrottle::new(
+                        app.clone(),
+                        recipient.clone(),
+                        "prepare",
+                    );
+                    let result = node
+                        .send_file_dm_progress_if(
+                            &recipient,
+                            std::path::Path::new(&path),
+                            file_kind(media),
+                            move |p| prog.emit(p.done, p.total),
+                            |commit| admission.authorize_accept(runtime, commit),
+                        )
+                        .await;
+                    cleanup_pasted_file(&app, &path);
+                    let id = result.map_err(CommandError::from)?;
+                    Ok(hex::encode(id.as_bytes()))
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 #[tauri::command]
@@ -281,39 +291,47 @@ pub async fn send_file_to_account<R: tauri::Runtime>(
     path: String,
     media: bool,
 ) -> Result<String, CommandError> {
-    let admission = match RuntimeAdmission::capture_current(&session, &state) {
-        Ok(admission) => admission,
-        Err(error) => {
-            cleanup_pasted_file(&app, &path);
-            return Err(error);
-        }
-    };
-    let mut prog = crate::events::ProgressThrottle::new(app.clone(), account.clone(), "prepare");
-    let cleanup_app = app.clone();
-    let cleanup_path = path.clone();
-    let result = admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let result = runtime
-                    .handle()
-                    .send_file_to_account_progress_if(
-                        &account,
-                        std::path::Path::new(&path),
-                        file_kind(media),
-                        move |p| prog.emit(p.done, p.total),
-                        |accept| admission.authorize_accept(runtime, accept),
-                    )
-                    .await;
-                cleanup_pasted_file(&cleanup_app, &path);
-                result
-                    .map(|id| hex::encode(id.as_bytes()))
-                    .map_err(CommandError::from)
+    let result = async {
+        let admission = match RuntimeAdmission::capture_current(&session, &state) {
+            Ok(admission) => admission,
+            Err(error) => {
+                cleanup_pasted_file(&app, &path);
+                return Err(error);
+            }
+        };
+        let mut prog =
+            crate::events::ProgressThrottle::new(app.clone(), account.clone(), "prepare");
+        let cleanup_app = app.clone();
+        let cleanup_path = path.clone();
+        let result = admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let result = runtime
+                        .handle()
+                        .send_file_to_account_progress_if(
+                            &account,
+                            std::path::Path::new(&path),
+                            file_kind(media),
+                            move |p| prog.emit(p.done, p.total),
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await;
+                    cleanup_pasted_file(&cleanup_app, &path);
+                    result
+                        .map(|id| hex::encode(id.as_bytes()))
+                        .map_err(CommandError::from)
+                })
             })
-        })
-        .await;
-    // Also cover refusal before the detached operation obtains a runtime.
+            .await;
+        // Also cover refusal before the detached operation obtains a runtime.
+        if result.is_err() {
+            cleanup_pasted_file(&app, &cleanup_path);
+        }
+        result
+    }
+    .await;
     if result.is_err() {
-        cleanup_pasted_file(&app, &cleanup_path);
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
     }
     result
 }
@@ -329,33 +347,40 @@ pub async fn send_file_channel<R: tauri::Runtime>(
     progress_key: Option<String>,
     expires_at_ms: Option<u64>,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&session, &state)?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let id = parse_channel_id(&channel_id)?;
-                let node = runtime.handle();
-                let mut prog = crate::events::ProgressThrottle::new(
-                    app.clone(),
-                    progress_key.unwrap_or_else(|| channel_id.clone()),
-                    "prepare",
-                );
-                let result = node
-                    .send_file_channel_progress_expiring_if(
-                        id,
-                        std::path::Path::new(&path),
-                        file_kind(media),
-                        move |p| prog.emit(p.done, p.total),
-                        expires_at_ms,
-                        |commit| admission.authorize_accept(runtime, commit),
-                    )
-                    .await;
-                cleanup_pasted_file(&app, &path);
-                let file_conv = result.map_err(CommandError::from)?;
-                Ok(hex::encode(file_conv.as_bytes()))
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&session, &state)?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let id = parse_channel_id(&channel_id)?;
+                    let node = runtime.handle();
+                    let mut prog = crate::events::ProgressThrottle::new(
+                        app.clone(),
+                        progress_key.unwrap_or_else(|| channel_id.clone()),
+                        "prepare",
+                    );
+                    let result = node
+                        .send_file_channel_progress_expiring_if(
+                            id,
+                            std::path::Path::new(&path),
+                            file_kind(media),
+                            move |p| prog.emit(p.done, p.total),
+                            expires_at_ms,
+                            |commit| admission.authorize_accept(runtime, commit),
+                        )
+                        .await;
+                    cleanup_pasted_file(&app, &path);
+                    let file_conv = result.map_err(CommandError::from)?;
+                    Ok(hex::encode(file_conv.as_bytes()))
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 #[tauri::command]

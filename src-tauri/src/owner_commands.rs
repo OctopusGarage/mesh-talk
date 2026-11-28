@@ -637,6 +637,8 @@ pub struct MessageStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<mesh_talk_core::node::DeliveryObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    custody: Option<mesh_talk_core::node::DeliveryCustody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_progress: Option<OutgoingFileStatus>,
 }
 
@@ -670,6 +672,7 @@ pub async fn owner_delivery_statuses(
         .collect::<Result<Vec<_>, _>>()?;
     admission
         .with_runtime(|runtime| {
+            let custody = runtime.handle().account_delivery_custody(&account, &ids);
             Ok(runtime
                 .handle()
                 .account_delivery_observations(&account, &ids)
@@ -678,6 +681,9 @@ pub async fn owner_delivery_statuses(
                     id: hex::encode(id.as_bytes()),
                     status,
                     observation,
+                    custody: (status == mesh_talk_core::node::DeliveryStatus::Awaiting)
+                        .then(|| custody.get(&id).copied())
+                        .flatten(),
                     file_progress: runtime.handle().outgoing_file_progress(id).map(|progress| {
                         OutgoingFileStatus {
                             done: progress.done,
@@ -1363,6 +1369,9 @@ mod tests {
                     crate::message_favorites::owner_save_message_favorite,
                     crate::message_favorites::owner_edit_message_favorite,
                     crate::message_favorites::owner_remove_message_favorite,
+                    crate::lan_review::owner_preview_lan_review,
+                    crate::lan_review::owner_start_lan_review,
+                    crate::lan_review::owner_revoke_lan_review,
                     crate::message_favorites::owner_inspect_message_favorites,
                     crate::message_favorites::owner_favorite_file_available,
                     crate::message_favorites::owner_read_favorite_file,
@@ -1391,6 +1400,7 @@ mod tests {
                     crate::privacy_commands::accept_account_binding_change,
                     crate::privacy_commands::set_invisible,
                     crate::privacy_commands::set_privacy_allowed,
+                    crate::privacy_commands::set_personal_privacy,
                     crate::privacy_commands::initiate_privacy_contact
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -2604,6 +2614,59 @@ mod tests {
     }
 
     #[test]
+    fn held_channel_custody_read_does_not_block_session_and_rejects_authority_change() {
+        use std::time::Duration;
+        use tauri::Manager;
+        for lock in [true, false] {
+            let fixture = Fixture::new();
+            let (entered, running) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let released = std::sync::Mutex::new(released);
+            *fixture.app_state.custody_observation_hook.lock().unwrap() =
+                Some(Box::new(move || {
+                    entered.send(()).unwrap();
+                    released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }));
+            let webview = fixture.webview.clone();
+            let query = std::thread::spawn(move || {
+                invoke(
+                    &webview,
+                    "channel_custody_statuses",
+                    serde_json::json!({"channelId":"11".repeat(32),"ids":["22".repeat(32)]}),
+                )
+            });
+            running.recv_timeout(Duration::from_secs(5)).unwrap();
+            let webview = fixture.webview.clone();
+            let app = fixture.app_state.clone();
+            let (changed, observed) = std::sync::mpsc::channel();
+            let change = std::thread::spawn(move || {
+                if lock {
+                    crate::app_lock::lock_app(
+                        webview.state::<AppState>(),
+                        webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                    // A transient lock must fence an older query even after unlock.
+                    app.app_lock().clear();
+                } else {
+                    app.session()
+                        .set("replacement".into(), user("alice"), "pw".into());
+                }
+                changed.send(()).unwrap();
+            });
+            let responsive = observed.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            change.join().unwrap();
+            responsive.expect("desktop authority should be available during custody reads");
+            assert_eq!(query.join().unwrap().unwrap_err()["kind"], "authorization");
+        }
+    }
+
+    #[test]
     fn registered_group_control_requires_typed_access_for_every_generic_document_command() {
         let fixture = Fixture::new();
         let account = fixture
@@ -3046,6 +3109,421 @@ mod tests {
                 *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
         }
+    }
+
+    #[test]
+    fn registered_lan_review_preview_denies_the_wrong_owner_and_a_locked_desktop() {
+        use tauri::Manager;
+
+        let fixture = Fixture::new();
+        let target = fixture.offline_peer();
+        let sent = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({
+                    "owner": "alice",
+                    "account": target,
+                    "text": "<tag>ordinary text</tag>",
+                    "replyTo": null
+                }),
+            )
+            .unwrap();
+        let mut request = serde_json::json!({
+            "owner": "alice",
+            "source": {"kind": "account", "target": target, "message_ids": [sent]}
+        });
+        assert_eq!(
+            fixture
+                .invoke("owner_preview_lan_review", request.clone())
+                .unwrap(),
+            serde_json::json!("<tag>ordinary text</tag>")
+        );
+        request["owner"] = serde_json::json!("bob");
+        assert_eq!(
+            fixture
+                .invoke("owner_preview_lan_review", request.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+
+        request["owner"] = serde_json::json!("alice");
+        let handle = fixture.webview.app_handle();
+        crate::app_lock::lock_app(handle.state(), handle.state()).unwrap();
+        assert_eq!(
+            fixture
+                .invoke("owner_preview_lan_review", request)
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+    }
+
+    #[test]
+    #[ignore = "binds a physical LAN interface for native acceptance"]
+    fn registered_lan_review_revokes_during_an_admitted_projection() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let text = "LAN review projection fixture";
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":text,"replyTo":null}),
+            )
+            .unwrap();
+        let start = serde_json::json!({
+            "owner": "alice",
+            "source": {"kind": "account", "target": account, "message_ids": [id]},
+            "preview": text
+        });
+        let grant = fixture
+            .invoke("owner_start_lan_review", start.clone())
+            .unwrap();
+        let request = |grant: &serde_json::Value| {
+            let url = grant["url"].as_str().unwrap();
+            let (host, path) = url
+                .strip_prefix("http://")
+                .unwrap()
+                .split_once('/')
+                .unwrap();
+            let address: SocketAddr = host.parse().unwrap();
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(socket, "GET /{path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+            (socket, address)
+        };
+        let (entered, release) = fixture.app_state.lan_review.hold_next_projection();
+        let (mut client, address) = request(&grant);
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        fixture
+            .invoke(
+                "owner_revoke_lan_review",
+                serde_json::json!({"owner":"alice","grantId":grant["id"]}),
+            )
+            .unwrap();
+        let mut body = Vec::new();
+        if let Err(error) = client.read_to_end(&mut body) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(body.is_empty());
+        assert!(TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err());
+        assert!(
+            fixture
+                .invoke("owner_start_lan_review", start.clone())
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let fresh = loop {
+            if let Ok(grant) = fixture.invoke("owner_start_lan_review", start.clone()) {
+                break grant;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not release the reservation"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_ne!(fresh["id"], grant["id"]);
+        let (entered, release) = fixture.app_state.lan_review.hold_next_projection();
+        let (mut client, address) = request(&fresh);
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        fixture
+            .invoke(
+                "recall_message",
+                serde_json::json!({"convId":account,"target":id,"isChannel":false}),
+            )
+            .unwrap();
+        release.send(()).unwrap();
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(!response.starts_with(b"HTTP/1.1 200"));
+        assert!(!String::from_utf8_lossy(&response).contains(text));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "recall did not retire the listener"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1_500;
+        let expiring_id = fixture.invoke("owner_enqueue_text", serde_json::json!({
+            "owner":"alice","account":account,"text":text,"replyTo":null,"expiresAtMs":expires,
+        })).unwrap();
+        let expiring = fixture
+            .invoke(
+                "owner_start_lan_review",
+                serde_json::json!({
+                    "owner":"alice",
+                    "source":{"kind":"account","target":account,"message_ids":[expiring_id]},
+                    "preview":text,
+                }),
+            )
+            .unwrap();
+        let (entered, release) = fixture.app_state.lan_review.hold_next_projection();
+        let (mut client, _) = request(&expiring);
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        release.send(()).unwrap();
+        assert!(
+            response.is_empty(),
+            "expiry closes the stalled request before disclosure"
+        );
+
+        let fresh_id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({
+                    "owner":"alice","account":account,"text":text,"replyTo":null,
+                }),
+            )
+            .unwrap();
+        let fresh_start = serde_json::json!({
+            "owner":"alice",
+            "source":{"kind":"account","target":account,"message_ids":[fresh_id]},
+            "preview":text,
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let fresh = loop {
+            if let Ok(grant) = fixture.invoke("owner_start_lan_review", fresh_start.clone()) {
+                break grant;
+            }
+            assert!(Instant::now() < deadline, "expired worker did not drain");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (entered, release_projection) = fixture.app_state.lan_review.hold_next_projection();
+        let (mut client, _) = request(&fresh);
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let hold_session = || {
+            let session = fixture.app_state.session().clone();
+            let lease = session.capture().unwrap();
+            let (entered, matching) = std::sync::mpsc::channel();
+            let (release_session, resume) = std::sync::mpsc::channel();
+            let authority = std::thread::spawn(move || {
+                session
+                    .matching(&lease, |_| {
+                        entered.send(()).unwrap();
+                        resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                    })
+                    .unwrap();
+            });
+            matching.recv_timeout(Duration::from_secs(1)).unwrap();
+            (release_session, authority)
+        };
+        let (release_session, authority) = hold_session();
+        release_projection.send(()).unwrap();
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(
+            response.is_empty(),
+            "HTTP timeout must not wait for the desktop session mutex"
+        );
+        release_session.send(()).unwrap();
+        authority.join().unwrap();
+
+        // Releasing desktop authority does not join the earlier projection or
+        // quiesce other source users. A read can fail closed while they drain.
+        let recovery_deadline = Instant::now() + Duration::from_secs(3);
+        let expected = loop {
+            let (mut control, _) = request(&fresh);
+            let mut response = String::new();
+            control.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200") {
+                break response;
+            }
+            assert!(
+                response.starts_with("HTTP/1.1 404")
+                    && response
+                        .split_once("\r\n\r\n")
+                        .is_some_and(|(_, body)| body.is_empty())
+                    && Instant::now() < recovery_deadline,
+                "control response status: {:?}",
+                response.lines().next()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(expected.ends_with(text));
+
+        // A request that expires before it can acquire desktop authority
+        // must not begin source projection after that authority unblocks.
+        let (projected, release_projection) = fixture.app_state.lan_review.hold_next_projection();
+        let (release_session, authority) = hold_session();
+        let (mut client, _) = request(&fresh);
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(response.is_empty());
+        release_session.send(()).unwrap();
+        authority.join().unwrap();
+        assert!(projected.recv_timeout(Duration::from_millis(300)).is_err());
+        drop(release_projection);
+
+        fixture
+            .invoke(
+                "owner_revoke_lan_review",
+                serde_json::json!({
+                    "owner":"alice","grantId":fresh["id"],
+                }),
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let fresh = loop {
+            if let Ok(grant) = fixture.invoke("owner_start_lan_review", fresh_start.clone()) {
+                break grant;
+            }
+            assert!(Instant::now() < deadline, "revoked response did not drain");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (entered, release) = fixture.app_state.lan_review.hold_next_projection();
+        let (mut client, address) = request(&fresh);
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Drop without running the graceful host-task drain.
+        drop(fixture.node.0.blocking_write().take().unwrap());
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(response.is_empty());
+        assert!(TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err());
+        assert!(fixture.app_state.lan_review.has_reservation());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.app_state.lan_review.has_reservation() {
+            assert!(
+                Instant::now() < deadline,
+                "aborted task abandoned its reservation"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore = "binds a physical LAN interface for native acceptance"]
+    fn registered_lan_review_withdraws_a_stalled_start_without_losing_work_ownership() {
+        use std::time::{Duration, Instant};
+
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let text = "LAN review startup fixture";
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":text,"replyTo":null}),
+            )
+            .unwrap();
+        let start = serde_json::json!({
+            "owner": "alice",
+            "source": {"kind": "account", "target": account, "message_ids": [id]},
+            "preview": text
+        });
+        // Warm the exact source so derived indexing does not affect this race.
+        fixture
+            .invoke("owner_preview_lan_review", start.clone())
+            .unwrap();
+        let (entered, release_preview) = fixture.app_state.lan_review.hold_next_projection();
+        let webview = fixture.webview.clone();
+        let request = start.clone();
+        let preview =
+            std::thread::spawn(move || invoke(&webview, "owner_preview_lan_review", request));
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            preview.join().unwrap().is_err(),
+            "preview caller must time out"
+        );
+        assert!(
+            fixture
+                .invoke("owner_preview_lan_review", start.clone())
+                .is_err(),
+            "the actual blocked worker must retain the only preview slot"
+        );
+        release_preview.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(value) = fixture.invoke("owner_preview_lan_review", start.clone()) {
+                assert_eq!(value, serde_json::json!(text));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preview worker did not release its slot"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let (entered, release) = fixture.app_state.lan_review.hold_next_projection();
+        let webview = fixture.webview.clone();
+        let request = start.clone();
+        let scheduled =
+            std::thread::spawn(move || invoke(&webview, "owner_start_lan_review", request));
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        fixture
+            .invoke(
+                "owner_revoke_lan_review",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert!(scheduled.join().unwrap().is_err());
+        assert!(
+            fixture
+                .invoke("owner_start_lan_review", start.clone())
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let fresh = loop {
+            if let Ok(grant) = fixture.invoke("owner_start_lan_review", start.clone()) {
+                break grant;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "withdrawn startup retained the slot"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        fixture
+            .invoke(
+                "owner_revoke_lan_review",
+                serde_json::json!({"owner":"alice","grantId":fresh["id"]}),
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.app_state.lan_review.has_reservation() {
+            assert!(Instant::now() < deadline, "revoked startup did not drain");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (observing, release) = fixture.app_state.lan_review.hold_next_interface_scan();
+        let webview = fixture.webview.clone();
+        let scheduled =
+            std::thread::spawn(move || invoke(&webview, "owner_start_lan_review", start));
+        observing.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(fixture.node.0.blocking_write().take().unwrap());
+        release.send(()).unwrap();
+        assert!(scheduled.join().unwrap().is_err());
     }
 
     #[test]
@@ -5276,7 +5754,7 @@ mod tests {
         assert_eq!(fixture.sync_documents(), before);
     }
 
-    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 6] {
+    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 7] {
         [
             ("get_privacy", serde_json::json!({"owner":"alice"})),
             (
@@ -5296,6 +5774,10 @@ mod tests {
             (
                 "set_privacy_allowed",
                 serde_json::json!({"owner":"alice","account":account,"allowed":true}),
+            ),
+            (
+                "set_personal_privacy",
+                serde_json::json!({"owner":"alice","account":account,"enabled":true}),
             ),
             (
                 "initiate_privacy_contact",
@@ -5395,6 +5877,7 @@ mod tests {
         for command in [
             "set_invisible",
             "set_privacy_allowed",
+            "set_personal_privacy",
             "initiate_privacy_contact",
         ] {
             registered_logout_during_local_grant_wait(command);
@@ -5503,6 +5986,9 @@ mod tests {
             "set_privacy_allowed" => {
                 serde_json::json!({"owner":owner,"account":account,"allowed":true})
             }
+            "set_personal_privacy" => {
+                serde_json::json!({"owner":owner,"account":account,"enabled":true})
+            }
             "initiate_privacy_contact" => serde_json::json!({"owner":owner,"account":account}),
             "send_file_to_account" => {
                 serde_json::json!({"account":account,"path":path,"media":false})
@@ -5535,7 +6021,10 @@ mod tests {
         };
         let privacy = matches!(
             command,
-            "set_invisible" | "set_privacy_allowed" | "initiate_privacy_contact"
+            "set_invisible"
+                | "set_privacy_allowed"
+                | "set_personal_privacy"
+                | "initiate_privacy_contact"
         );
         let authorized = wait_phase(if privacy {
             "owner-entry"
@@ -5898,6 +6387,7 @@ mod tests {
             id: "message".into(),
             status: mesh_talk_core::node::DeliveryStatus::Awaiting,
             observation: None,
+            custody: None,
             file_progress: None,
         };
         assert_eq!(
@@ -5917,6 +6407,7 @@ mod tests {
             serde_json::json!({"id":"message", "status":"awaiting", "observation":{"kind":"retry_scheduled", "age_ms":42}})
         );
         let explained = super::MessageStatus {
+            custody: Some(mesh_talk_core::node::DeliveryCustody::PostOffice),
             observation: Some(mesh_talk_core::node::DeliveryObservation {
                 kind: mesh_talk_core::node::DeliveryObservationKind::RetryScheduled,
                 age_ms: 42,
@@ -5924,6 +6415,10 @@ mod tests {
             }),
             ..observed
         };
+        assert_eq!(
+            serde_json::to_value(&explained).unwrap()["custody"],
+            "post_office"
+        );
         assert_eq!(
             serde_json::to_value(&explained).unwrap()["observation"]["reason"],
             "no_known_route"

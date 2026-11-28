@@ -193,38 +193,84 @@ groups. See [personal conversation removal](../CONTEXT.md#conversations-and-hist
 
 ### Discovered contacts without chat history
 
-A discovered account that has never had durable sent messages, received messages
-or file cards disappears from local contact lists 24 hours after its first local
-roster observation. The clock belongs to the local profile and current account;
-continuous discovery, name changes, extra devices and application restarts do not
-renew it. Existing installations start that clock on their first observation after
-upgrade because discovery heartbeat timestamps cannot establish an account's age.
-Deadlines use the device's wall clock. Once an expiry is committed, later clock
-corrections or restarts do not make that never-chatted contact visible again.
+An account that has never had durable sent messages, received messages or file
+cards is retained while online. After all its ordinary certified devices go
+offline, the next existing roster observation starts a local 24-hour grace
+period. Returning online cancels that deadline; a later disconnect starts a new
+24-hour period. Public Online uses the same fresh observations and bounded
+reconnect tolerance as the presence UI, not mere retained dial routes. Explicit
+hide/delete controls retain precedence.
+
+After the offline grace period, the host removes the unused contact row and its
+local pending-contact record, including its account key and clock. No automatic
+expiry tombstone is retained. Stale offline routing records cannot recreate a
+contact; a new online discovery can. Protocol identity/routing retention and
+personal deletion remain with their existing owners, and automatic cleanup does
+not publish a contact deletion or affect delivery, shared groups or permissions.
 
 Any durable message or file history protects the account, including after local
 history is cleared or pruned: the authenticated transcript conversation index
-retains that historical fact. History erased before that index existed cannot be
-reconstructed. New incoming messages can make an expired contact visible again.
-This automatic presentation policy never publishes personal contact deletion,
-erases history or verified identities, or changes discovery, routing and delivery.
+retains that historical fact. Sticky history facts from older journals remain
+protected too. History erased before either evidence source existed cannot be
+reconstructed. Classification failures never authorize reclamation.
 
 The host checks indexed conversation metadata in batches of at most 128 without
-reading message bodies. Its separate local journal retains first-observation
-clocks, completed-expiry markers and sticky observed-history flags for up to 4096 accounts per local
-profile/account, at most 512 KiB on read. Expired and history-protected keys remain
-to prevent rediscovery from renewing their clocks. At capacity, new
-untracked contacts remain visible; storage and eligibility-query failures also
-preserve visible contacts. Recovery never replaces unreadable journal data with
-an empty clock set. Unchanged roster observations do not write the journal. The
-frontend schedules only the earliest pending deadline and refreshes after expiry
-or a first committed direct message/file;
-there is no recurring expiry maintenance task after pending work is gone.
+reading message bodies, including pending contacts absent from the live roster.
+Its existing local journal holds online/pending contacts and sticky historical
+facts for at most 4096 accounts and 512 KiB per local profile/account. Reclamation
+releases pending-contact capacity. At capacity, untracked online contacts remain
+visible; no unbounded tracking is added. An entirely absent peer remains visible
+through its recorded grace period. Existing offline deadlines survive restart;
+if no observation exists for downtime, restart starts the grace period
+conservatively. Older first-discovery clocks cannot establish offline age and are
+migrated conservatively when read. Unreadable journals are preserved for recovery.
+Unchanged online or offline observations do not write the journal.
+
+Cleanup reuses the existing roster/presence invalidations, activation/recovery
+reads and earliest-contact-deadline scheduler. It adds no thread, recurring poll
+or independent cleanup task, and need not run at the exact expiry instant. Online
+and history-protected rows carry no contact-expiry deadline. When pending work is
+gone, no contact cleanup timer remains. Unchanged heartbeat presence reuses the
+account list; online/offline transitions recheck it.
 Repeated backfill from an unmapped device shares a two-second leading/trailing
 refresh window with at most 256 device hints and one pending deadline. The first
 message from a distinct device still triggers prompt eligibility checking; an
 in-flight read can publish while same-device receipts continue. Drained work
 leaves no timer. Device hints never establish account identity or history.
+
+## Exposure by observer
+
+Evaluate confidentiality and linkability separately. Passive observers,
+authenticated peers, authorized recipients and optional relay operators have
+different views. An administrator with access to a local endpoint or an
+exported file is a separate threat.
+
+| Surface | Protection and residual exposure |
+| --- | --- |
+| Local sign-in and profile | Local credentials, encrypted profile storage and account/device signing keys protect different assets. The authenticated runtime handles live key material. App lock controls app access but does not evict live keys. See [startup verification](#startup-verification) and the [storage architecture](ARCHITECTURE.md). |
+| Physical LAN discovery | A passive observer on a reachable discovery segment can see source addresses and readable [signed announcements](../crates/mesh-talk-core/src/discovery/announce.rs), including identity keys, display name, listener port and the account certificate when present. Signatures authenticate those facts. Stable fields and timing permit correlation. |
+| Direct chat, history and files | [Noise and signed reconciliation](network-design-reference.md) protect authenticated application traffic. Network observers can see socket endpoints, packet sizes and timing. The direct endpoint knows its authenticated counterpart and gains only the content authorized by membership, history and file policy. |
+| Post-office custody and federation | [Opaque mailbox protection](post-office-metadata-privacy.md) keeps inner content encrypted for the recipient under its documented key assumptions. Relays retain visibility of the connecting address, mailbox pseudonyms, sizes and timing. Trusted federation participants may correlate the mailbox pseudonyms they share. |
+| Calls and screen sharing | [Call signaling and media](network-design-reference.md#f-calls-live-signaling-and-separate-media) use separate paths. Authorized participants receive the media. ICE and the established media route have their own address exposure. Post-office mailbox delivery does not provide a call media relay. |
+| Temporary browser review | [LAN review](lan-review.md) sends selected text and the link using HTTP. A recipient or LAN observer may retain an authorized response. Lock, logout, expiry and revocation stop future admissions; an already authorized response may finish within its deadline. |
+| Diagnostics and exports | A desktop session must still hold its original session and lock revision when a background sample or log read is released. Lock and logout retire monitoring. The log tail comes from an app-wide file and may include earlier sessions, identifiers, paths, addresses or errors. Copy and save export raw text. Review the output before sharing. An explicitly admitted file export may finish after lock. |
+| Backup and integrations | [Recovery-key encryption](backup-recovery.md) protects archives under its documented key assumptions. A storage provider can still see archive metadata and service activity. [Integration grants](bot-integrations.md) restrict approved access. Recipients and external consumers may retain data already disclosed. |
+
+### Reducing address and identity exposure
+
+Restricting public discovery and optional origin disclosure can reduce
+application-level identifiers visible outside the permitted audience. An
+indirect data path can avoid giving the other endpoint a direct connection
+address for that path. The intermediary still observes connection endpoints
+and traffic patterns. A separate direct, discovery or media path can expose
+additional addresses.
+
+Requiring indirect delivery everywhere would add a dependency on relay
+availability and capacity, change latency and energy costs, and require
+separate acceptance for discovery, calls and offline recovery. Stable
+account and device proofs currently support contact trust, key transitions
+and synchronization. Any change to those proofs, default discovery or route
+policy requires an agreed observer model and compatibility evidence.
 
 ## Limits
 
@@ -246,3 +292,16 @@ keys or guarantee erasure of browser, operating-system or process memory.
 
 For implementation details, see [the architecture](ARCHITECTURE.md). For backup
 limits, see [backup and recovery](backup-recovery.md).
+
+
+## Personal communication controls
+
+Approved contacts only is opt-in for unsolicited personal messages, calls and
+file invitations. The existing manual and initiated permissions identify
+approved accounts. A local block overrides either permission across devices
+with a verified binding to the blocked account. A rejected attempt does not
+create a contact request. Existing local history is retained. Joined group
+traffic and certified linked-device synchronization keep their own admission
+rules. When the mode is on, starting a personal call uses the existing initiated
+contact permission so the recipient can answer. The settings are stored in
+the encrypted local profile policy.

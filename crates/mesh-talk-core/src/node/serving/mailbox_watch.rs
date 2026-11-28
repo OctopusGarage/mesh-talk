@@ -281,8 +281,7 @@ impl Node {
                                         self.observe_mailbox_work(work::RECEIVE_DRAIN_DIRTY, None);
                                         watch = None;
                                     }
-                                    schedule.completed(key.clone(), result, tokio::time::Instant::now());
-                                    if follow_up { schedule.due.retain(|(k,_)| k != &key); }
+                                    schedule.completed(key.clone(), result, follow_up, tokio::time::Instant::now());
                                     if let Some(delay) = delay {
                                         retry_watch.retain(|(k,_)| k != &key);
                                         retry_watch.push((key.clone(), tokio::time::Instant::now()+delay));
@@ -316,7 +315,7 @@ impl Node {
                                     else {
                                         retry_watch.retain(|(k,_)| k != &key);
                                         retry_watch.push((key.clone(), tokio::time::Instant::now()+Duration::from_secs(30)));
-                                        schedule.completed(key, Some(false), tokio::time::Instant::now());
+                                        schedule.completed(key, Some(false), false, tokio::time::Instant::now());
                                     }
                                 }
                                 Err(_) => {
@@ -344,8 +343,10 @@ impl Node {
                         for (key, abort) in &cancellations {
                             if watching.contains(key) { abort.abort(); }
                         }
+                        // Preserve the ordinary cadence for parked relays. A
+                        // broad storage hint can arrive during an empty drain,
+                        // even though it added no attributable mailbox scope.
                         ready.clear();
-                        schedule.due.clear();
                     },
                     _ = network.changed() => {
                         self.observe_mailbox_work(work::RECEIVE_NETWORK_RESTART, None);

@@ -2,7 +2,7 @@ use crate::services::auth_service::AuthService;
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-type FileProgressHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>>;
+type BlockingTestHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>>;
 #[cfg(test)]
 type HostOperationGate = Arc<
     Mutex<
@@ -21,6 +21,7 @@ pub use crate::desktop_session::{SessionInfo, SessionState};
 /// node runs out of [`crate::chat_commands::NodeState`].)
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) totp_pending: Arc<Mutex<Option<crate::account_security::Pending>>>,
     pub(crate) enrollment: crate::device_enrollment::EnrollmentState,
     pub(crate) drafts: Arc<Mutex<Option<crate::drafts::DraftStorage>>>,
     app_lock: crate::app_lock::AppLock,
@@ -33,7 +34,10 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) owner_command_captured: Arc<Mutex<Option<std::sync::mpsc::Sender<&'static str>>>>,
     #[cfg(test)]
-    pub(crate) owner_file_progress_hook: FileProgressHook,
+    pub(crate) owner_file_progress_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(crate) custody_observation_hook: BlockingTestHook,
+    pub(crate) lan_review: crate::lan_review::LanReview,
     pub(crate) integrations: crate::integrations::local_access::DesktopIntegrations,
     auth_service: AuthService,
     badge_revision: Arc<Mutex<BadgeRevision>>,
@@ -46,6 +50,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(auth_service: AuthService) -> Self {
         Self {
+            totp_pending: Arc::new(Mutex::new(None)),
             enrollment: crate::device_enrollment::EnrollmentState::default(),
             drafts: Arc::new(Mutex::new(None)),
             app_lock: crate::app_lock::AppLock::default(),
@@ -59,6 +64,9 @@ impl AppState {
             owner_command_captured: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             owner_file_progress_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            custody_observation_hook: Arc::new(Mutex::new(None)),
+            lan_review: crate::lan_review::LanReview::default(),
             integrations: crate::integrations::local_access::DesktopIntegrations::default(),
             auth_service,
             badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),

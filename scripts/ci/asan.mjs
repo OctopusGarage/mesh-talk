@@ -210,7 +210,7 @@ export async function verifyArchive(directory, identity) {
   assert.equal(hash(manifestBytes), identity.archive.manifestSha256, "ASan archive manifest digest mismatch");
   const manifest = JSON.parse(manifestBytes);
   assert.equal(manifest.schema, 1, "Unsupported ASan archive manifest");
-  assert.deepEqual(manifest.identity, buildIdentity(identity), "ASan archive source/compiler/config identity mismatch");
+  assert.deepEqual(manifest.identity, buildIdentity(identity.archive.runAttempt ? { ...identity, runAttempt: identity.archive.runAttempt } : identity), "ASan archive source/compiler/config identity mismatch");
   assert.equal(manifest.archiveSha256, identity.archive.sha256, "ASan producer archive digest mismatch");
   assert.equal(await fileHash(path.join(directory, "core.tar.zst")), identity.archive.sha256, "ASan archive digest mismatch");
   assert.equal(digest(manifest.full), manifest.fullSha256, "ASan producer inventory digest mismatch");
@@ -242,6 +242,16 @@ async function cohort() {
   console.log(`ASan cohort: ${toolchain} (${rustcSha256})`);
 }
 
+export function archiveBinding(env, runAttempt) {
+  if (!env.MESH_ASAN_ARCHIVE_SHA256 && !env.MESH_ASAN_MANIFEST_SHA256) return null;
+  const archive = { sha256: env.MESH_ASAN_ARCHIVE_SHA256, manifestSha256: env.MESH_ASAN_MANIFEST_SHA256, runAttempt: env.MESH_ASAN_PRODUCER_ATTEMPT };
+  for (const value of [archive.sha256, archive.manifestSha256]) assert.match(value ?? "", /^[a-f0-9]{64}$/u, "Missing trusted ASan build output digest");
+  assert.match(archive.runAttempt ?? "", /^[1-9]\d*$/u, "Missing trusted ASan producer attempt");
+  assert.match(runAttempt ?? "", /^[1-9]\d*$/u, "Invalid ASan consumer attempt");
+  assert.ok(BigInt(archive.runAttempt) <= BigInt(runAttempt), "Future ASan producer attempt");
+  return archive;
+}
+
 async function expectedIdentity() {
   assert.equal(process.platform, "linux", "Hosted ASan requires Linux");
   assert.equal(process.arch, "x64", "Hosted ASan requires x86-64");
@@ -258,8 +268,7 @@ async function expectedIdentity() {
   for (const key of ["CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]) assert.ok(!process.env[key], `ASan ${key} may override instrumentation`);
   const inputs = ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", config, "scripts/ci/asan.mjs", "scripts/ci/windows-coverage.mjs", ".github/workflows/sanitizers.yml"].map(file => [file, hash(readFileSync(file))]);
   const profileEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("CARGO_PROFILE_")).sort(([a], [b]) => a.localeCompare(b)));
-  const archive = process.env.MESH_ASAN_ARCHIVE_SHA256 || process.env.MESH_ASAN_MANIFEST_SHA256 ? { sha256: process.env.MESH_ASAN_ARCHIVE_SHA256, manifestSha256: process.env.MESH_ASAN_MANIFEST_SHA256 } : null;
-  if (archive) for (const value of Object.values(archive)) assert.match(value ?? "", /^[a-f0-9]{64}$/u, "Missing trusted ASan build output digest");
+  const archive = archiveBinding(process.env, runAttempt);
   return { sourceSha, sourceTree, runId, runAttempt, platform: process.platform, architecture: process.arch, toolchain, rustcSha256, cargoSha256, nextest: versions.nextest, inputsSha256: digest(inputs), target, rustflags: process.env.RUSTFLAGS, rustdocflags: process.env.RUSTDOCFLAGS, asanOptions: process.env.ASAN_OPTIONS, testThreads: process.env.RUST_TEST_THREADS, profileEnvironment, archive };
 }
 
@@ -343,13 +352,24 @@ export function artifactName(identity, shard) {
 }
 
 export function collectAsan(root, identity) {
-  assert.deepEqual(readdirSync(root).sort(), partitions.map(shard => artifactName(identity, shard)), "Missing, stale or unexpected ASan artifacts");
+  const latest = new Map();
+  for (const name of readdirSync(root)) {
+    const match = /^asan-([a-f0-9]{40})-([1-9]\d*)-([1-9]\d*)-shard-([1-8])$/u.exec(name);
+    assert.ok(match && match[1] === identity.sourceSha && match[2] === identity.runId && BigInt(match[3]) <= BigInt(identity.runAttempt), "Invalid ASan artifacts");
+    const shard = Number(match[4]);
+    const previous = latest.get(shard);
+    if (!previous || BigInt(match[3]) > BigInt(previous.attempt)) latest.set(shard, { name, attempt: match[3] });
+  }
+  assert.deepEqual([...latest.keys()].sort(), partitions, "Missing ASan artifacts");
   const bundles = partitions.map(shard => {
-    const directory = path.join(root, artifactName(identity, shard));
-    verifySmoke(directory, identity);
+    const { name, attempt } = latest.get(shard);
+    const directory = path.join(root, name);
+    const receiptIdentity = { ...identity, runAttempt: attempt };
+    try { verifySmoke(directory, receiptIdentity); } catch (error) { throw new Error("Invalid ASan artifacts smoke", { cause: error }); }
     const receipt = read(path.join(directory, "receipt.json"));
     assert.equal(receipt.shard, shard, "ASan receipt differs from its artifact folder shard");
-    return { receipt, full: read(path.join(directory, "full.json")), selected: read(path.join(directory, "selected.json")), execution: readFileSync(path.join(directory, "execution.jsonl"), "utf8") };
+    assert.deepEqual(receipt.identity, receiptIdentity, "ASan artifacts source/run/toolchain/config identity mismatch");
+    return { receipt: { ...receipt, identity }, full: read(path.join(directory, "full.json")), selected: read(path.join(directory, "selected.json")), execution: readFileSync(path.join(directory, "execution.jsonl"), "utf8") };
   });
   return verifyAsanUnion(bundles, identity);
 }

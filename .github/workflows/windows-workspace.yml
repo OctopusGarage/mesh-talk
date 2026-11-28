@@ -32,6 +32,8 @@ jobs:
     timeout-minutes: 60
     outputs:
       rust: ${{ steps.compiler.outputs.rust }}
+      producer_attempt: ${{ steps.compiler.outputs.attempt }}
+      archive_id: ${{ steps.workspace_archive.outputs.artifact-id }}
     defaults:
       run:
         shell: bash
@@ -68,7 +70,9 @@ jobs:
       - name: Pin producer compiler for consumers
         if: ${{ steps.scope.outputs.full == 'true' }}
         id: compiler
-        run: rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
+        run: |
+          rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         if: ${{ steps.scope.outputs.full == 'true' }}
         env:
@@ -114,6 +118,7 @@ jobs:
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs produce "$RUNNER_TEMP/windows-workspace-archive"
       - name: Upload sealed workspace archive
+        id: workspace_archive
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/upload-artifact@v7
         with:
@@ -171,11 +176,13 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # A shard-only rerun retains its producer's original artifact ID.
+          artifact-ids: ${{ needs.build.outputs.archive_id }}
           path: ${{ runner.temp }}/windows-workspace-archive
       - name: Run validated serial shard and export partial coverage
         if: ${{ steps.scope.outputs.full == 'true' }}
         env:
+          MESH_WINDOWS_PRODUCER_ATTEMPT: ${{ needs.build.outputs.producer_attempt }}
           CARGO_NET_OFFLINE: 'true'
           # Collect every selected case so one failure does not hide later defects.
           MESH_WINDOWS_FAIL_FAST: '0'

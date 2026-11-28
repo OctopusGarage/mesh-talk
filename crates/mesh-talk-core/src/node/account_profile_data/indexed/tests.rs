@@ -24,10 +24,18 @@ fn indexed_signed_profiles_preserve_ties_dates_and_atomic_current_value() {
     let mut store = IndexedAccountProfileStore::from_profile(owner.clone(), &path, "pw").unwrap();
     assert_eq!(store.get(&id).unwrap(), Some(clear));
     assert!(!store.accepts(&photo).unwrap());
+    let mut changes = store.subscribe_own_changes(id.clone());
+    let other = Account::from_secret_bytes([4; 32]);
+    assert!(store.record(value(&other, 1, None)).unwrap());
+    assert!(!changes.has_changed().unwrap());
     let mut dated = value(&account, 8, None);
     dated.created_at_ms = Some(42);
     dated.resign(&account);
     assert!(store.record(dated.clone()).unwrap());
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    assert!(!store.record(dated.clone()).unwrap());
+    assert!(!changes.has_changed().unwrap());
     let mut changed = dated.clone();
     changed.revision = 9;
     changed.created_at_ms = Some(43);
@@ -42,6 +50,7 @@ fn indexed_signed_profiles_preserve_ties_dates_and_atomic_current_value() {
     next.revision = 11;
     next.resign(&account);
     assert!(store.record(next).is_err());
+    assert!(!changes.has_changed().unwrap());
     assert_eq!(store.get(&id).unwrap(), Some(dated));
     assert_eq!(store.revision().unwrap(), revision);
 }

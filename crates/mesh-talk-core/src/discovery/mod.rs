@@ -5,6 +5,14 @@
 
 pub mod announce;
 pub mod candidates;
+#[cfg(target_os = "linux")]
+mod interface_events;
+#[cfg(target_os = "macos")]
+#[path = "interface_events_macos.rs"]
+mod interface_events;
+#[cfg(windows)]
+#[path = "interface_events_windows.rs"]
+mod interface_events;
 pub mod query;
 pub mod roster;
 pub(crate) mod scope;
@@ -13,4 +21,5 @@ pub mod visibility;
 
 pub use announce::Announce;
 pub use roster::{PeerRecord, Roster, UpdateOutcome, UserId};
+pub use scope::LanIpv4Scope;
 pub use visibility::DiscoveryVisibility;

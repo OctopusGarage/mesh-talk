@@ -21,6 +21,13 @@ pub struct FavoriteSource {
     pub target: String,
     pub message_ids: Vec<String>,
 }
+/// Exact ordinary-text projection and both retained expiry constraints.
+pub struct LanReviewText {
+    pub text: String,
+    pub expires_at_ms: Option<u64>,
+    pub recipient_expires_at: Option<std::time::Instant>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FavoriteMetadata {
     pub title: String,
@@ -151,7 +158,7 @@ impl FavoriteRecord {
 pub(super) struct FavoriteStore {
     file: EncryptedRecordLog<FavoriteRecord>,
     pub(super) current: BTreeMap<String, FavoriteRecord>,
-    mutation_revision: u64,
+    changes: tokio::sync::watch::Sender<u64>,
     media_prune: Option<FavoriteMediaPrune>,
 }
 
@@ -167,7 +174,7 @@ impl FavoriteStore {
         let mut store = Self {
             file,
             current: BTreeMap::new(),
-            mutation_revision: 0,
+            changes: tokio::sync::watch::channel(0).0,
             media_prune: None,
         };
         for record in records {
@@ -204,10 +211,15 @@ impl FavoriteStore {
         }
         self.file.append_durable(&record)?;
         self.current.insert(record.favorite.id.clone(), record);
-        self.mutation_revision = self.mutation_revision.wrapping_add(1);
         self.media_prune = None;
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
         Ok(true)
     }
+    pub(super) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
     pub(super) fn live_files(&self, now: u64) -> std::collections::HashSet<ConversationId> {
         self.current
             .values()

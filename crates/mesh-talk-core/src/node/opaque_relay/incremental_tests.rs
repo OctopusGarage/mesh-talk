@@ -579,6 +579,10 @@ async fn assert_incremental_consent_offer_selection(send_only: bool) {
         let other_recipient = DeviceIdentity::generate();
         let other_mailbox =
             RelayMailbox::federated(&other_sender, &other_recipient.public()).unwrap();
+        let other_before = office
+            .mailbox_delta_page(&other_mailbox.id(), None, 64)
+            .unwrap()
+            .cursor;
         assert_ne!(other_mailbox.id(), mailbox.id());
         let inner = Event::new(
             &other_sender,
@@ -608,9 +612,17 @@ async fn assert_incremental_consent_offer_selection(send_only: bool) {
         assert_eq!(after.epoch, before.epoch);
         assert_eq!(after.first_seen, before.first_seen);
         assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            after.after, before.after,
+            "unrelated mailbox writes cannot advance this mailbox's checkpoint"
+        );
+        let other_after = office
+            .mailbox_delta_page(&other_mailbox.id(), None, 64)
+            .unwrap()
+            .cursor;
         assert!(
-            after.after > before.after,
-            "only the relay's global upper must advance"
+            other_after.after > other_before.after,
+            "the mailbox that received the real wrapper must advance"
         );
         super::super::file_consent::offered_observations::reset();
         let writes = node.storage.database().successful_write_commits();

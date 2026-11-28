@@ -244,6 +244,7 @@
   "Choose a desktop download": "Escolha um download para computador",
   "{label} is unavailable in this release.": "{label} não está disponível nesta versão.",
   "ZIP · {size} MB": "ZIP · {size} MB",
+  "{format} · {size} MB": "{format} · {size} MB",
   "Stable {version} · Choose your computer’s architecture. Downloads are hosted on GitHub.": "Versão estável {version} · Escolha a arquitetura do seu computador. Os downloads são hospedados no GitHub.",
   "Stable {version} · {platform} · {label} · {size} MB ZIP": "Versão estável {version} · {platform} · {label} · ZIP de {size} MB",
   "Open Mesh-Talk on your Mac": "Abrir o Mesh-Talk no seu Mac",

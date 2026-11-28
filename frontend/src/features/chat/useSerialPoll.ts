@@ -1,9 +1,14 @@
 import {
+  isNativeWindowMinimized,
+  subscribeNativeWindowMinimized,
+} from "@/lib/nativeWindowVisibility";
+import {
   subscribeSyncInvalidation,
   supportsPushState,
   type SyncInvalidation,
 } from "@/lib/syncInvalidation";
 import { readWithDeadline } from "@/lib/readDeadline";
+import { RECOVERY_REFRESH_MS } from "@/lib/recoveryRefresh";
 import { useEffect, useRef } from "react";
 
 /** Event-owned refresh with one visible recovery deadline and one actual read. */
@@ -15,6 +20,7 @@ export function useSerialPoll<T>(
   onError: (error: unknown) => void,
   wakeOn?: SyncInvalidation["kind"],
   acceptsInvalidation?: (change: SyncInvalidation) => boolean,
+  pushRecoveryMs = RECOVERY_REFRESH_MS,
 ) {
   const handlers = useRef({ request, onResult, onError, acceptsInvalidation });
   useEffect(() => {
@@ -27,15 +33,16 @@ export function useSerialPoll<T>(
     let busy = false;
     let dirty = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const hidden = () => document.hidden || isNativeWindowMinimized();
     const schedule = () => {
       clearTimeout(timer);
-      if (!active || busy || document.hidden) return;
-      const delay = wakeOn && supportsPushState() ? 300_000 : intervalMs;
+      if (!active || busy || hidden()) return;
+      const delay = wakeOn && supportsPushState() ? pushRecoveryMs : intervalMs;
       timer = setTimeout(() => poll(), delay);
     };
     const poll = (invalidate = false) => {
       if (!active) return;
-      if (busy || document.hidden) {
+      if (busy || hidden()) {
         dirty ||= invalidate;
         return;
       }
@@ -63,7 +70,7 @@ export function useSerialPoll<T>(
           const release = () => {
             busy = false;
             if (!active) return;
-            if (dirty && !document.hidden) poll();
+            if (dirty && !hidden()) poll();
             else schedule();
           };
           // A UI timeout cannot cancel native work. Drain after actual settlement
@@ -80,18 +87,20 @@ export function useSerialPoll<T>(
         poll(true);
     });
     const foreground = () => {
-      if (!document.hidden) poll(true);
+      if (!hidden()) poll(true);
       else clearTimeout(timer);
     };
     window.addEventListener("focus", foreground);
     document.addEventListener("visibilitychange", foreground);
+    const stopNative = subscribeNativeWindowMinimized(foreground);
     poll();
     return () => {
       active = false;
       clearTimeout(timer);
       window.removeEventListener("focus", foreground);
       document.removeEventListener("visibilitychange", foreground);
+      stopNative();
       unlisten();
     };
-  }, [enabled, intervalMs, wakeOn]);
+  }, [enabled, intervalMs, wakeOn, pushRecoveryMs]);
 }

@@ -410,7 +410,7 @@ export function FilesTray({
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
-                {downloadFailures[f.fileConv] && (
+                {!savedPaths[f.fileConv] && downloadFailures[f.fileConv] && (
                   <div
                     role="alert"
                     className="mt-1 pl-6 text-xs text-destructive"

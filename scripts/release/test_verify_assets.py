@@ -91,6 +91,34 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_complete_release(self):
         self.assertEqual(len(self.verify()), 12)
 
+    def test_standalone_linux_installers_are_complete_and_match_signed_zip(self):
+        with self.assertRaisesRegex(ValueError, "incomplete or unexpected asset set"):
+            verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False,
+                             require_linux_downloads=True)
+        for platform in ("linux_aarch64", "linux_x86_64"):
+            for name, payload in self.entries[platform].items():
+                ext = name.rsplit(".", 1)[1]
+                (self.root / f"mesh-talk-installer_v0.1.5_{platform}.{ext}").write_bytes(payload)
+        self.assertEqual(len(self.verify()), 12)
+        path = self.root / "mesh-talk-installer_v0.1.5_linux_x86_64.deb"
+        path.write_bytes(b"foreign installer")
+        with self.assertRaisesRegex(ValueError, "standalone installer differs"):
+            self.verify()
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "incomplete or unexpected asset set"):
+            self.verify()
+
+    def test_standalone_linux_downloads_reuse_the_appimage_updater(self):
+        self.add_updater_assets()
+        for platform in ("linux_aarch64", "linux_x86_64"):
+            for ext in ("deb", "rpm"):
+                (self.root / f"mesh-talk-installer_v0.1.5_{platform}.{ext}").write_bytes(
+                    self.entries[platform][f"release/installer 0.1.5.{ext}"])
+        self.assertEqual(len(self.verify()), 12)
+        (self.root / "mesh-talk-installer_v0.1.5_linux_x86_64.AppImage").write_bytes(b"installer bytes")
+        with self.assertRaisesRegex(ValueError, "incomplete or unexpected asset set"):
+            self.verify()
+
     def add_updater_assets(self):
         for platform in self.entries:
             extension = "app.tar.gz" if platform.startswith("macos_") else "nsis.exe" if platform.startswith("windows_") else "AppImage"

@@ -32,6 +32,7 @@ const RECEPTION_KINDS: readonly string[] = [
   "files",
   "documents",
   "sync_status",
+  "read_receipts",
 ];
 
 /** Older hosts omit metadata; malformed or future domains need conservative repair. */

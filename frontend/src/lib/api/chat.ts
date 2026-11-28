@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  NodeIdentity,
   AccountGroupControlRequest,
   AccountGroupOperationStatus,
   PersonalConversationState,
@@ -8,6 +9,8 @@ import type {
 import { invokeSensitive } from "./sensitiveInvoke";
 
 /** Local scheduling facts only; absence means unknown. */
+export type DeliveryCustody = "post_office" | "recipient_registered_office";
+
 export interface DeliveryObservation {
   kind: "attempting" | "retry_scheduled";
   age_ms: number;
@@ -131,6 +134,8 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
+  recognizeImageText: (owner: string, png: string) =>
+    invoke<string>("owner_recognize_image_text", { owner, png }),
   reactionSummaries: (
     owner: string,
     kind: "account" | "channel",
@@ -234,16 +239,7 @@ export const chat = {
       device_id?: string;
     } | null>("owner_startup_identity", { owner }),
   ownerIdentity: (owner: string) =>
-    invoke<{
-      owner: string;
-      device_id: string;
-      account_id: string;
-      display_name?: string;
-      history_revision?: number;
-      supports_push_state?: boolean;
-      supports_bounded_delivery?: boolean;
-      runtime_id?: string;
-    }>("owner_node_identity", { owner }),
+    invoke<NodeIdentity>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
     account: string,
@@ -459,6 +455,7 @@ export const chat = {
         id: string;
         status: "awaiting" | "delivered";
         observation?: DeliveryObservation;
+        custody?: DeliveryCustody;
         file_progress?: OutgoingFileStatus;
       }>
     >("owner_delivery_statuses", { owner, account, ids }),
@@ -471,10 +468,12 @@ export const chat = {
   setNotificationContext: (
     activePeerDevices: string[],
     activeChannel: string | null,
+    language?: string,
   ) =>
     invoke<void>("set_notification_context", {
       activePeerDevices,
       activeChannel,
+      language,
       revision: nextBadgeRevision(),
     }),
 
@@ -610,8 +609,10 @@ export const chat = {
     }),
   createChannel: (name: string, memberAccountIds: string[]) =>
     invoke<string>("create_channel", { name, memberAccountIds }),
-  channelMembers: (channelId: string) =>
-    invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  channelMembers: (
+    channelId: string,
+    options?: { includeAccountAccess: boolean },
+  ) => invoke<ChannelMembersInfo>("channel_members", { channelId, ...options }),
   setChannelHistoryPolicy: (channelId: string, policy: ChannelHistoryPolicy) =>
     invoke<void>("set_channel_history_policy", { channelId, policy }),
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
@@ -664,6 +665,13 @@ export const chat = {
       replyTo,
       expiresAtMs,
     }),
+  fetchChannelHistoryPage: (channelId: string, cursor: string | null = null) =>
+    invoke<{
+      status:
+        "page" | "preparing" | "blocked" | "unsupported" | "reset" | "offline";
+      applied: number;
+      cursor: string | null;
+    }>("fetch_channel_history_page", { channelId, cursor }),
   channelHistory: (channelId: string, limit: number) =>
     invoke<HistoryItem[]>("channel_history", { channelId, limit }),
   reactChannel: (

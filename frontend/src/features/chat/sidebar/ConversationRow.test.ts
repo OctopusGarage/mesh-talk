@@ -3,6 +3,7 @@ import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
+import { useSettings } from "@/store/settings";
 import { useChat } from "@/store/chat";
 import { useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
@@ -17,6 +18,7 @@ const key = "channel:team";
 beforeEach(async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   await i18n.changeLanguage("en");
+  useSettings.setState({ mutedGroups: [] });
   useChat.setState({
     ...emptyReception({
       [key]: {
@@ -207,3 +209,17 @@ it.each([
     expect(document.querySelector('[role="menu"]')).toBeNull();
   },
 );
+
+it("shows only mention attention in muted groups and a neutral dot for ordinary unread", async () => {
+  useSettings.setState({ mutedGroups: ["team"] });
+  await render();
+  expect(host.querySelector(".font-mono")?.textContent).toBe("1");
+  await act(async () =>
+    useChat.setState({
+      ledger: { [key]: { ordinary: { seen: false, late: false } } },
+    }),
+  );
+  expect(host.querySelector(".font-mono")).toBeNull();
+  expect(host.querySelector('[aria-label="2 unread (muted)"]')).not.toBeNull();
+  expect(useChat.getState().unread[key]).toBe(2);
+});

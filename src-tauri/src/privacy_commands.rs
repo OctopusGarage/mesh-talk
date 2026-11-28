@@ -17,6 +17,7 @@ enum Change {
     Mode(bool),
     Allow(String, bool),
     Initiate(String),
+    Personal(Option<String>, bool),
 }
 async fn dispatch(
     app: &AppState,
@@ -57,6 +58,10 @@ async fn dispatch(
                     Change::Mode(value) => node.set_invisible_guarded(value, authorize).await,
                     Change::Allow(account, allowed) => {
                         node.set_allowed_guarded(&account, allowed, authorize).await
+                    }
+                    Change::Personal(account, enabled) => {
+                        node.set_personal_privacy_guarded(account.as_deref(), enabled, authorize)
+                            .await
                     }
                     Change::Initiate(account) => {
                         node.initiate_contact_guarded(&account, authorize).await
@@ -112,6 +117,17 @@ pub async fn set_privacy_allowed(
 ) -> Result<PrivacyResponse, String> {
     dispatch(&app, &node, owner, Change::Allow(account, allowed)).await
 }
+#[tauri::command]
+pub async fn set_personal_privacy(
+    owner: String,
+    account: Option<String>,
+    enabled: bool,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<PrivacyResponse, String> {
+    dispatch(&app, &node, owner, Change::Personal(account, enabled)).await
+}
+
 #[tauri::command]
 pub async fn initiate_privacy_contact(
     owner: String,

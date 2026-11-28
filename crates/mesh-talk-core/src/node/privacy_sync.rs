@@ -62,6 +62,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     use_node_preparation: bool,
     received_work: std::collections::HashSet<ConversationId>,
     track_reception: bool,
+    received_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 // Field order keeps the actual SQL retirement alive until its work permit ends.
 struct PreparedViewsRetirement {
@@ -78,6 +79,11 @@ impl GuardedSyncStore<'_> {
     #[cfg(test)]
     pub(in crate::node) fn take_received_work(&mut self) -> bool {
         !self.take_received_conversations().is_empty()
+    }
+
+    /// Coalesced wake from durable admission, without a timer or a log scan.
+    pub(in crate::node) fn reception_notify(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.received_notify.clone()
     }
 
     pub(in crate::node) fn take_received_conversations(
@@ -164,6 +170,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: false,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -182,6 +189,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: false,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
 
@@ -201,6 +209,7 @@ impl Node {
             use_node_preparation: false,
             track_reception: true,
             received_work: Default::default(),
+            received_notify: Default::default(),
         })
     }
 
@@ -688,6 +697,7 @@ impl GuardedSyncStore<'_> {
                 self.denied = true;
             } else if self.track_reception {
                 self.received_work.insert(conversation);
+                self.received_notify.notify_one();
             }
             return Some(result);
         }
@@ -1687,14 +1697,31 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .expect("files lock not poisoned")
                 .contains_file(event.conversation_id)?
         };
+        let personal_author = (!known_file
+            && matches!(event.kind, EventKind::Message | EventKind::FileManifest))
+        .then(|| self.node.historical_author(event.author.ed25519_pub()))
+        .flatten();
+        if let Some(proof) = personal_author.as_ref()
+            && super::conversation::dm_conversation_id(
+                &self.node.identity.public(),
+                &proof.public(),
+            ) == event.conversation_id
+            && !self
+                .node
+                .personal_peer_allowed(&proof.public(), Some(proof))
+        {
+            self.denied = true;
+            return Err(LogError::AdmissionRejected(
+                "personal communication denied".into(),
+            ));
+        }
         // A chunk-first legacy sender must not fill the recipient's log before
         // its offer has arrived. Ordinary messages have an authenticated DM,
         // control, or established channel scope; a fresh file conversation has
         // none until its verified manifest has been installed.
         if event.kind == EventKind::Message && !known_file {
             let own = self.node.identity.public();
-            let peer = self.node.historical_author(event.author.ed25519_pub());
-            let direct = peer.as_ref().is_some_and(|proof| {
+            let direct = personal_author.as_ref().is_some_and(|proof| {
                 super::conversation::dm_conversation_id(&own, &proof.public())
                     == event.conversation_id
                     || super::delivery_receipt::delivery_conversation_id(&own, &proof.public())
@@ -1866,6 +1893,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         // above remains connection-local until its approved atomic commit.
         if result.is_ok() && self.track_reception {
             self.received_work.insert(conversation);
+            self.received_notify.notify_one();
         }
         result
     }

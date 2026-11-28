@@ -152,3 +152,35 @@ mod tests {
         }
     }
 }
+
+/// The physical IPv4 interface selected for a temporary LAN service.
+#[derive(Clone, Debug)]
+pub struct LanIpv4Scope(LanInterface);
+
+impl LanIpv4Scope {
+    /// Select a single unambiguous physical IPv4 interface.
+    pub fn current() -> Option<Self> {
+        let mut candidates = inventory()
+            .into_iter()
+            .filter(|interface| interface.address.is_ipv4() && (1..32).contains(&interface.prefix));
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(Self(candidate))
+    }
+
+    pub fn address(&self) -> IpAddr {
+        self.0.address
+    }
+
+    pub fn is_current(&self) -> bool {
+        inventory().iter().any(|interface| {
+            interface.address == self.0.address
+                && interface.prefix == self.0.prefix
+                && interface.index == self.0.index
+        })
+    }
+
+    /// Require the actual TCP peer to belong to the selected subnet.
+    pub fn admits(&self, peer: SocketAddr) -> bool {
+        peer.is_ipv4() && permits(std::slice::from_ref(&self.0), peer)
+    }
+}

@@ -21,6 +21,14 @@ in ignored `tmp/` or PR/CI artifacts; durable decisions belong in the owning gui
 For producer/consumer artifact handoffs, pass the successful upload's immutable
 artifact ID instead of rediscovering it by name. Keep source, run, attempt and
 content-digest validation at the consumer; an artifact ID alone is not acceptance.
+A partial rerun may reuse a successful producer from an earlier attempt of the
+same workflow run. Keep that producer's attempt in its sealed archive/evidence,
+and record the current consumer attempt separately. Select the latest eligible
+artifact for each required role/shard, then verify its own attempt together with
+the unchanged source, run, compiler/configuration and content bindings. Reject
+missing, ambiguous, future or mismatched evidence; a newer failed producer must
+not be hidden by silently falling back to older successful output. Full inventory
+and upstream-success requirements still apply after a partial rerun.
 Release evidence recording and upload retain their verified-draft prerequisite but run
 after final publication failure or cancellation. Keep failure summaries actionable and
 source-bound. Nonpublishing branch runs retain workflow-artifact evidence without requiring
@@ -783,8 +791,13 @@ uninstrumented remaining-workspace consumers plus native Host coverage.
 
 The Linux consumers restore no Rust cache, install no frontend dependencies and
 compile no Cargo targets. They install the producer's exact Rust version,
-matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
-packages. Both producer and consumer dependency installers explicitly request every
+matching LLVM tools and required Tauri runtime packages. The producer installs
+pinned prebuilt Nextest and llvm-cov once. Consumers fetch those binaries by
+immutable artifact ID and verify their checksums and source/run/attempt identity
+before executing them. Consumers install the verified tools at the producer’s
+Cargo binary path so the sealed LLVM coverage wrapper path stays identical. This
+removes external tool downloads from test fan-out.
+Both producer and consumer dependency installers explicitly request every
 package sealed by the Linux runtime identity, including `libc6`. Preinstalled
 runner-image copies can remain older when only development or runtime dependencies
 are requested. Keep exact package equality as an admission gate. The installer
@@ -965,6 +978,12 @@ do not depend on developer-installed tools or add scanner setup to every runner
 just to exercise scheduling. Keep real scanner acceptance in its existing job.
 Exercise interrupted log finalization as well as child retirement through the
 existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
+Observe stream settlement even if cancellation has already destroyed the log.
+End only a live stream so a second close attempt cannot mask the cause of
+cancellation or the command's exit status.
+When a test asserts localized output or resource keys, await the production
+catalog loader or language switch before reading them. Keep each fixture
+independent of catalogs loaded by other tests.
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs.
@@ -1317,3 +1336,13 @@ This does not lower the configured patch target for ordinary new changes or
 replace dev's current-head protected integration checks. Large ordinary diffs
 remain fully measured within a bounded 32 MiB Git output budget; over-budget
 input fails rather than becoming an empty or truncated patch.
+
+ASan archive builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only` throughout the workflow. This retains
+source/line backtraces while avoiding full variable/type DWARF generation in the
+instrumented core test binary. The existing archive identity seals these profile
+variables across producer and consumers. Sanitizer instrumentation, leak detection,
+assertions, the complete test inventory and deadlines remain required. Two hosted
+archive attempts lost runner communication during compilation; this reduces build
+resource demand but does not establish OOM as their cause. See the
+[Cargo debug profile reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).

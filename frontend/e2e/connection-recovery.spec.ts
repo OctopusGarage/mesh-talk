@@ -142,12 +142,32 @@ test("manual endpoint discovery retries after failure and submits a trimmed addr
   await expect(dialog.getByRole("status")).toContainText(
     "Discovery query sent",
   );
+  await address.fill("2001:db8::1");
+  await expect(dialog.getByRole("status")).toHaveCount(0);
+  await findDevice.click();
+  await expect(dialog.getByRole("status")).toContainText(
+    "Discovery query sent",
+  );
+
+  await address.fill("[2001:db8::2]:47500");
+  await findDevice.click();
+  await expect(dialog.getByRole("status")).toContainText(
+    "Discovery query sent",
+  );
+
   const probedEndpoints = await page.evaluate(
     () =>
-      (window as unknown as { __mockProbedEndpoints: string[] })
-        .__mockProbedEndpoints,
+      (
+        window as unknown as {
+          __mockProbedEndpoints: { host: string; port?: number }[];
+        }
+      ).__mockProbedEndpoints,
   );
-  expect(probedEndpoints).toEqual(["100.101.102.103:47474"]);
+  expect(probedEndpoints).toEqual([
+    { host: "100.101.102.103", port: 47474 },
+    { host: "2001:db8::1" },
+    { host: "2001:db8::2", port: 47500 },
+  ]);
 
   await address.fill("100.101.102.104");
   await expect(dialog.getByRole("status")).toHaveCount(0);

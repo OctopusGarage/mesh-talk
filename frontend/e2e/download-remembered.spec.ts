@@ -72,41 +72,60 @@ test("a downloaded attachment is remembered across reload", async ({
   ).toHaveCount(0);
 });
 
-test("automatic export reports a failed write and waits for explicit retry", async ({
-  page,
-}) => {
-  await login(page);
-  await page.evaluate(
-    (file) => {
-      const win = window as unknown as {
-        __saveAttempts: number;
-        __mockEmit: (event: string, payload: unknown) => void;
-        __TAURI_INTERNALS__: {
-          invoke: (
-            cmd: string,
-            args: Record<string, unknown>,
-          ) => Promise<unknown>;
+// Mocked IPC verifies UI recovery and the selected destination, not native disk writes.
+for (const action of ["Retry", "Save as…"]) {
+  test(`automatic export clears the failed write after ${action} succeeds`, async ({
+    page,
+  }) => {
+    await login(page);
+    await page.evaluate(
+      (file) => {
+        const win = window as unknown as {
+          __saveAttempts: number;
+          __saveDestinations: unknown[];
+          __mockEmit: (event: string, payload: unknown) => void;
+          __TAURI_INTERNALS__: {
+            invoke: (
+              cmd: string,
+              args: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
         };
-      };
-      win.__saveAttempts = 0;
-      const original = win.__TAURI_INTERNALS__.invoke;
-      win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
-        if (cmd === "save_file_to_dir" && ++win.__saveAttempts === 1)
-          throw new Error("disk full");
-        return original(cmd, args);
-      };
-      win.__mockEmit("file-received", file);
-    },
-    { ...PDF, file_conv: "fc_failed_write" },
-  );
-  await page.getByTestId("sidebar-action-files").click();
-  const tray = page.getByTestId("files-tray");
-  await expect(tray.getByRole("alert")).toContainText("disk full");
-  await expect(
-    tray.getByRole("button", { name: "Retry", exact: true }),
-  ).toBeEnabled();
-  await tray.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(
-    tray.getByRole("button", { name: "Reveal", exact: true }),
-  ).toBeVisible();
-});
+        win.__saveAttempts = 0;
+        win.__saveDestinations = [];
+        const original = win.__TAURI_INTERNALS__.invoke;
+        win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          if (cmd === "save_file_to_dir") {
+            win.__saveDestinations.push(args.dir);
+            if (++win.__saveAttempts === 1) throw new Error("disk full");
+          }
+          if (cmd === "save_file") win.__saveDestinations.push(args.dest);
+          if (cmd === "plugin:dialog|save") return "/home/tester/report.pdf";
+          return original(cmd, args);
+        };
+        win.__mockEmit("file-received", file);
+      },
+      { ...PDF, file_conv: "fc_failed_write" },
+    );
+    await page.getByTestId("sidebar-action-files").click();
+    const tray = page.getByTestId("files-tray");
+    await expect(tray.getByRole("alert")).toContainText("disk full");
+    await expect(
+      tray.getByRole("button", { name: action, exact: true }),
+    ).toBeEnabled();
+    await tray.getByRole("button", { name: action, exact: true }).click();
+    await expect(
+      tray.getByRole("button", { name: "Reveal", exact: true }),
+    ).toBeVisible();
+    await expect(tray.getByRole("alert")).toHaveCount(0);
+    const destinations = await page.evaluate(
+      () =>
+        (window as unknown as { __saveDestinations: string[] })
+          .__saveDestinations,
+    );
+    expect(destinations).toEqual([
+      "/home/tester/Downloads",
+      action === "Retry" ? "/home/tester/Downloads" : "/home/tester/report.pdf",
+    ]);
+  });
+}

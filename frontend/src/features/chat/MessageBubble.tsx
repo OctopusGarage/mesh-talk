@@ -1,3 +1,5 @@
+import { decodeCodeBlock } from "@/lib/codeBlock";
+import { CodeBlockView } from "./CodeBlockView";
 import { canForward } from "./forwarding/selection";
 import { ForwardedRecordPreview } from "./forwarding/ForwardedRecordPreview";
 import { isForwardedRecord } from "@/lib/forwardedRecord";
@@ -8,10 +10,11 @@ import {
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
 import { createAttachmentDecision } from "./attachments/attachmentDecision";
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Star,
+  Link2,
   ListChecks,
   Copy,
   CornerUpLeft,
@@ -111,7 +114,9 @@ function FileBubble({
   );
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
-  const autoFailure = useAutomaticDownloads((s) => s.failures[file.fileConv]);
+  const autoFailure = useAutomaticDownloads((s) =>
+    savedPath ? undefined : s.failures[file.fileConv],
+  );
   const automatic = useChat(
     (s) =>
       !mine &&
@@ -360,10 +365,12 @@ export function MessageBubble({
   onRecall,
   onReEdit,
   onCollect,
+  onLanReview,
   onForward,
   onSelectMessages,
   collected = false,
 }: {
+  onLanReview?: (m: ChatMessage) => void;
   onCollect?: (m: ChatMessage) => void;
   onForward?: (m: ChatMessage) => void;
   onSelectMessages?: (m: ChatMessage) => void;
@@ -421,6 +428,10 @@ export function MessageBubble({
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
   const displayedText = m.protection ? t("protectedMessage.label") : m.text;
+  const codeBlock = useMemo(
+    () => decodeCodeBlock(displayedText),
+    [displayedText],
+  );
   const mine = m.fromMe;
   const localPreview = useOutgoingMediaPreview(
     mine && !readOnly && !m.protection ? m.clientId : undefined,
@@ -443,7 +454,10 @@ export function MessageBubble({
     const lease = captureChatOwnership();
     if (!m.text || m.protection) return;
     try {
-      await copySensitiveText(displayedText, t("settings.confirmCopyPrompt"));
+      await copySensitiveText(
+        codeBlock?.code ?? displayedText,
+        t("settings.confirmCopyPrompt"),
+      );
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
     }
@@ -711,6 +725,11 @@ export function MessageBubble({
                     readOnly={readOnly}
                     localPreview={localPreview}
                   />
+                ) : codeBlock ? (
+                  <CodeBlockView
+                    block={codeBlock}
+                    onCopy={() => void copyText()}
+                  />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {renderWithMentions(displayedText, { ownBubble: mine })}
@@ -728,6 +747,19 @@ export function MessageBubble({
                   {t("messageForwarding.forward")}
                 </ContextMenuItem>
               )}
+              {onLanReview &&
+                canCollect(m) &&
+                !m.file &&
+                !m.sticker &&
+                !!m.text.trim() && (
+                  <ContextMenuItem
+                    data-testid="msg-lan-review"
+                    onSelect={() => onLanReview(m)}
+                  >
+                    <Link2 className="h-3.5 w-3.5 opacity-70" />
+                    {t("lanReview.title")}
+                  </ContextMenuItem>
+                )}
               {onCollect && canCollect(m) && (
                 <ContextMenuItem
                   data-testid="msg-collect"

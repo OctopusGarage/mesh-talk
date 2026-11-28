@@ -35,6 +35,7 @@ import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { useDiagnosticsController } from "./diagnostics/useDiagnosticsController";
+import { HostResourceMonitor } from "./diagnostics/HostResourceMonitor";
 import type { DiagNetworkInfo, DiagPeerInfo } from "@/lib/types";
 
 /** A peer seen within this window reads as "online" (breathing teal). */
@@ -84,10 +85,10 @@ function Panel({
   return (
     <section className="space-y-2 rounded-lg border bg-card/40 p-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="flex items-center gap-2 font-display text-sm font-semibold tracking-tight">
+        <h3 className="flex items-center gap-2 font-display text-sm font-semibold tracking-tight">
           <span className="text-signal">{icon}</span>
           {title}
-        </p>
+        </h3>
         {action}
       </div>
       {children}
@@ -262,6 +263,34 @@ export function DiagnosticsDialog({
           <div className="max-h-[60vh] overflow-y-auto pr-0.5">
             {/* Overview: this device + environment */}
             <TabsContent value="overview" className="space-y-4">
+              <Panel
+                icon={<Activity className="h-4 w-4" />}
+                title={t("diagnostics.resources.title")}
+              >
+                {open && <HostResourceMonitor />}
+                {(env?.desktop_ready_ms != null ||
+                  env?.initial_interface_ms != null) && (
+                  <section className="grid gap-1 border-t border-border/65 pt-2">
+                    <h4 className="text-xs font-medium">
+                      {t("diagnostics.resources.sections.startup")}
+                    </h4>
+                    {env?.desktop_ready_ms != null && (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {t("diagnostics.resources.startup", {
+                          ms: env.desktop_ready_ms,
+                        })}
+                      </p>
+                    )}
+                    {env?.initial_interface_ms != null && (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {t("diagnostics.resources.presentation", {
+                          ms: env.initial_interface_ms,
+                        })}
+                      </p>
+                    )}
+                  </section>
+                )}
+              </Panel>
               <Panel
                 icon={<Wifi className="h-4 w-4" />}
                 title={t("diagnostics.thisDevice")}
@@ -690,6 +719,14 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
             <CopyValue value={p.user_id} label={shortId(p.user_id, 12)} />
             {p.via_gateway && <span>{t("diagnostics.viaGateway")}</span>}
             <CopyValue value={`${p.ip}:${p.tcp_port}`} />
+            <span>
+              {p.routed_latency
+                ? t("diagnostics.resources.routedLatency", {
+                    ms: p.routed_latency.round_trip_ms,
+                    age: p.routed_latency.age_secs,
+                  })
+                : t("diagnostics.resources.noLatency")}
+            </span>
           </div>
         </div>
       </div>

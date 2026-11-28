@@ -331,6 +331,12 @@ async fn removed_member_cannot_receive_updates_until_reinvitation_is_accepted() 
         .await
         .unwrap();
     copy(&owner, &member, group);
+    let before = metadata(&member, group);
+    assert_eq!(
+        before.announcement.unwrap().content.as_deref(),
+        Some("Before removal")
+    );
+    let stale_events = owner.metadata_events(group).unwrap();
     let previous = owner
         .metadata_events(group)
         .unwrap()
@@ -350,6 +356,11 @@ async fn removed_member_cannot_receive_updates_until_reinvitation_is_accepted() 
         .await
         .unwrap();
     copy(&owner, &member, group);
+    assert!(member.channel_metadata(group).is_err());
+    for event in stale_events.into_iter().rev() {
+        member.log.lock().unwrap().append(event).unwrap();
+    }
+    settle_channel(&member, group);
     assert!(member.channel_metadata(group).is_err());
     assert!(owner.retry_group_metadata().unwrap().is_empty());
     owner

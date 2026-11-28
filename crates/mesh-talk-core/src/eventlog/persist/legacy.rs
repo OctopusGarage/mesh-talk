@@ -73,7 +73,7 @@ impl LegacyEventLog {
     }
     #[cfg(test)]
     pub(crate) fn before_rewrite_rename(&mut self, hook: Box<dyn FnOnce() + Send + Sync>) {
-        self.file.before_rewrite_rename = Some(hook);
+        self.file.set_before_rewrite_rename(hook);
     }
     /// Open (or create) the log at `path`, replaying any stored events.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -1410,8 +1410,7 @@ mod tests {
         }
         log.sync().unwrap();
         let before = std::fs::read(&path).unwrap();
-        let blocked = path.with_extension("compact-tmp");
-        std::fs::create_dir(&blocked).unwrap();
+        log.file.fail_replacements_for_test(true);
         let now = Instant::now();
         assert!(log.drain_one_profile_compaction_at(now).is_err());
         assert_eq!(log.pending_profile_compactions(), 2);
@@ -1419,7 +1418,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(log.events(&first).len(), 10);
         assert_eq!(log.events(&second).len(), 10);
-        std::fs::remove_dir(blocked).unwrap();
+        log.file.fail_replacements_for_test(false);
         assert_eq!(
             log.drain_one_profile_compaction_at(now + Duration::from_secs(1))
                 .unwrap(),
@@ -1568,7 +1567,7 @@ mod tests {
 
         // Make the temporary rewrite target unusable. The original file must remain readable,
         // and the maintenance request must remain queued for a later retry.
-        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        log.file.fail_replacements_for_test(true);
         log.request_profile_compaction(conversation);
         assert!(log.drain_one_profile_compaction().is_err());
         assert_eq!(log.pending_profile_compactions(), 1);

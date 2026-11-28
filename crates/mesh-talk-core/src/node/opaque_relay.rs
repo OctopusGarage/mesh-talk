@@ -200,6 +200,7 @@ pub(in crate::node) struct PublicationProof {
     federated: bool,
 }
 struct PublicationRound {
+    confirmation_targets: Vec<(ConversationId, EventId)>,
     selected: Vec<(EventId, EventId)>,
     quiet: bool,
     proofs: Vec<PublicationProof>,
@@ -351,7 +352,7 @@ impl Node {
         conversation: Option<ConversationId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_relay_round_for(channel, recipient, conversation, None)
             .await
@@ -365,7 +366,7 @@ impl Node {
         confirm: Option<EventId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_relay_round_with_intent(
             channel,
@@ -386,7 +387,7 @@ impl Node {
         confirm: Option<EventId>,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         if !self.relay_send_allowed(channel.peer_identity()) {
             return Ok(Vec::new());
@@ -399,6 +400,38 @@ impl Node {
             MailboxIntent::HistoryPublication,
         )
         .await
+    }
+
+    /// Confirm the selected envelope in the scope that actually produced it.
+    pub(super) async fn confirm_history_relay_custody<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        event: EventId,
+    ) -> Result<bool, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            return Ok(false);
+        }
+        let publication = self
+            .opaque_relay_round_with_intent_observing(
+                channel,
+                recipient,
+                Some(conversation),
+                Some(event),
+                MailboxIntent::HistoryPublication,
+                false,
+            )
+            .await?;
+        for (scope, envelope) in publication.confirmation_targets {
+            if super::session::request_durable_have(channel, scope, envelope).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(in crate::node) fn publication_proofs_current(
@@ -442,7 +475,7 @@ impl Node {
         super::session::SessionError,
     >
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let result = self
             .opaque_relay_round_with_intent_observing(
@@ -473,7 +506,7 @@ impl Node {
         intent: MailboxIntent,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         Ok(self
             .opaque_relay_round_with_intent_observing(
@@ -498,13 +531,14 @@ impl Node {
         observe: bool,
     ) -> Result<PublicationRound, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
         {
             return Ok(PublicationRound {
                 selected: Vec::new(),
+                confirmation_targets: Vec::new(),
                 quiet: false,
                 proofs: Vec::new(),
             });
@@ -538,6 +572,9 @@ impl Node {
                 .await?;
             uploaded.quiet &= next.quiet;
             uploaded.selected.extend(next.selected);
+            uploaded
+                .confirmation_targets
+                .extend(next.confirmation_targets);
             uploaded.proofs.extend(next.proofs);
         }
         Ok(uploaded)
@@ -552,7 +589,7 @@ impl Node {
         mailbox: RelayMailbox,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.opaque_mailbox_round_confirmed(
             channel,
@@ -576,7 +613,7 @@ impl Node {
         intent: MailboxIntent,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         Ok(self
             .opaque_mailbox_round_confirmed_observing(
@@ -603,7 +640,7 @@ impl Node {
         observe: bool,
     ) -> Result<PublicationRound, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let privacy = self.privacy.generation.load(Ordering::SeqCst);
         let bridge = self.bridge_generation.load(Ordering::SeqCst);
@@ -628,6 +665,7 @@ impl Node {
             ),
         };
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
+        let mut confirmation_targets = Vec::new();
         if let Some(inner) = confirm {
             if !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
@@ -683,13 +721,14 @@ impl Node {
             if !current() || !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
             }
-            if let Some(outer) = outer
-                && !progress.uploaded.contains(&(inner, outer))
-            {
-                if progress.uploaded.len() >= 64 {
-                    progress.uploaded.remove(0);
+            if let Some(outer) = outer {
+                confirmation_targets.push((progress.mailbox.id(), outer));
+                if !progress.uploaded.contains(&(inner, outer)) {
+                    if progress.uploaded.len() >= 64 {
+                        progress.uploaded.remove(0);
+                    }
+                    progress.uploaded.push((inner, outer));
                 }
-                progress.uploaded.push((inner, outer));
             }
         }
         let local = if observe
@@ -717,6 +756,7 @@ impl Node {
         let quiet = !proofs.is_empty() && self.publication_proofs_current(&proofs)?;
         Ok(PublicationRound {
             selected: progress.uploaded,
+            confirmation_targets,
             quiet,
             proofs,
         })
@@ -728,7 +768,7 @@ impl Node {
         progress: &mut OpaqueMailboxProgress,
     ) -> Result<bool, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         self.advance_opaque_mailbox_if(channel, progress, &|| true)
             .await
@@ -741,7 +781,7 @@ impl Node {
         authorize_upload: &F,
     ) -> Result<bool, super::session::SessionError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
         F: Fn() -> bool + Sync,
     {
         if channel.peer_identity() != &progress.relay {
@@ -978,6 +1018,7 @@ impl Node {
         let mut processed = Vec::new();
         let mut retained = Vec::new();
         let mut semantic = Vec::new();
+        let mut attachment_progress = false;
         for outer in wrappers {
             self.observe_mailbox_work(
                 super::work_observation::reason::OUTER,
@@ -1153,12 +1194,20 @@ impl Node {
                 }
                 let inner_id = event.id;
                 let conv = event.conversation_id;
+                let is_chunk_candidate = event.kind == EventKind::Message;
                 let (admission, staged) = {
                     let mut store = store.lock().expect("projection lock not poisoned");
                     let admission = store.ingest(event);
                     let staged = store.uninvited_channel_staged(conv, inner_id);
                     (admission, staged)
                 };
+                if !attachment_progress
+                    && is_chunk_candidate
+                    && matches!(&admission, Ok(crate::eventlog::AppendOutcome::Appended))
+                    && self.has_file_scope(conv).unwrap_or(false)
+                {
+                    attachment_progress = true;
+                }
                 if let Err(error) = admission {
                     self.observe_mailbox_work(
                         super::work_observation::reason::ADMISSION_FAILED,
@@ -1248,6 +1297,11 @@ impl Node {
             }
             Ok(())
         })();
+        if attachment_progress {
+            // The direct lane reads the same retained events and can continue
+            // from this durable progress even when the rest of the page fails.
+            self.file_pull_notify.notify_one();
+        }
         store
             .lock()
             .expect("projection lock not poisoned")

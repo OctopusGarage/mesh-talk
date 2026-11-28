@@ -111,6 +111,11 @@ Ordinary and Favorite media share the
 publication. Staged attachment files open only while writing or installing, so
 large collections do not require one handle per retained file.
 
+Restore stages consecutive sent messages in pages of up to 128 records and
+1 MiB of plaintext. Each page writes the message bodies and their original
+event identities in one transaction. A conflicting body or identity rolls
+back the page and fails the staged restore before profile publication.
+
 Schema 3 signed public trust cards and proofs remain compatible, but manually
 declared dates never become system-recorded creation metadata. Private relationship
 observations are not included in public profile records. The retired

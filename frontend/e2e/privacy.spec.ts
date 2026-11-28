@@ -22,9 +22,12 @@ test.beforeEach(async ({ page }) => {
           { account_id: "b".repeat(32), names: ["Bob"], device_count: 2 },
         ];
       if (
-        !["get_privacy", "set_invisible", "set_privacy_allowed"].includes(
-          command,
-        )
+        ![
+          "get_privacy",
+          "set_invisible",
+          "set_privacy_allowed",
+          "set_personal_privacy",
+        ].includes(command)
       )
         return original(command, args);
       const key = `privacy-e2e-${String(args.owner)}`;
@@ -33,8 +36,10 @@ test.beforeEach(async ({ page }) => {
         ? JSON.parse(saved)
         : {
             owner: args.owner,
-            version: 1,
+            version: 2,
             invisible: false,
+            contacts_only: false,
+            blocked_accounts: [],
             allowed_accounts: [],
           };
       if (command === "set_invisible") state.invisible = args.invisible;
@@ -42,6 +47,13 @@ test.beforeEach(async ({ page }) => {
         state.allowed_accounts = args.allowed
           ? [{ id: args.account, name: "Bob", source: "Manual" }]
           : [];
+      if (command === "set_personal_privacy") {
+        if (args.account === null) {
+          state.contacts_only = args.enabled;
+        } else {
+          state.blocked_accounts = args.enabled ? [args.account] : [];
+        }
+      }
       localStorage.setItem(key, JSON.stringify(state));
       return state;
     };
@@ -127,6 +139,20 @@ test("invisible mode requires confirmation and survives reload", async ({
     "aria-checked",
     "true",
   );
+});
+test("personal privacy controls reflect acknowledged account settings", async ({
+  page,
+}) => {
+  await settings(page);
+  const toggle = page.getByRole("switch", { name: "Approved contacts only" });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await page.getByTestId("manage-privacy").click();
+  await page.getByRole("button", { name: "Block Bob" }).click();
+  await expect(page.getByRole("button", { name: "Unblock Bob" })).toBeVisible();
+  await page.getByRole("button", { name: "Unblock Bob" }).click();
+  await expect(page.getByRole("button", { name: "Block Bob" })).toBeVisible();
 });
 test("permission management supports search, grant and confirmed revoke", async ({
   page,

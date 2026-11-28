@@ -21,6 +21,7 @@
       "id": "MT-AI-002",
       "name": "e2e runner executes and triages real backend E2E",
       "subject_file": ".claude/agents/e2e-runner.md",
+      "context_files": ["Makefile"],
       "min_score": 0.9,
       "scenario": "A future edit changes the E2E runner prompt. Evaluate whether it still runs real mesh-talk-node multi-process tests and reports only evidence-backed green/failure states.",
       "rubric": [
@@ -93,7 +94,7 @@
       "name": "post-office macOS service runbook is operable and protects credentials",
       "subject_file": "docs/post-office-macos-service.md",
       "min_score": 0.9,
-      "scenario": "An operator installs or updates the headless post office on an Intel Mac. Evaluate whether the runbook supports a safe, verifiable service lifecycle and states its limits accurately.",
+      "scenario": "An operator installs or updates the headless post office on an Intel Mac. Evaluate whether the runbook supports a safe, verifiable service lifecycle and states its limits accurately. When tracing harness commands, read the complete acceptance CLI dispatcher, including shared success and error handling after the command arms.",
       "rubric": [
         "Names the installed binary, data, logs, boot LaunchDaemon and legacy LaunchAgent paths/jobs, and listening/discovery ports.",
         "Keeps the keystore password out of process arguments and the plist, and requires owner-only password file permissions.",
@@ -119,6 +120,7 @@
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/examples/network-acceptance.rs",
         "crates/mesh-talk-core/src/file/mod.rs",
         "crates/mesh-talk-core/src/file/crypto.rs",
@@ -142,6 +144,9 @@
       ],
       "context_files": [
         "scripts/install-post-office-windows.ps1",
+        "crates/mesh-talk-core/src/storage/profile.rs",
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
+        "crates/mesh-talk-core/src/postoffice/indexed.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
         "scripts/e2e-post-office-lan.py",
         "scripts/e2e-four-machine-tailnet.py",

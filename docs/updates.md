@@ -194,10 +194,34 @@ The same signing key authenticates canonical full packages and optional incremen
 
 ### Manual package size budgets
 
+Release builds record compressed download bytes for each target in the GitHub
+Actions job summary. Run `bash scripts/release/package-app.sh report_sizes`
+after local packaging to see the same report. Compare the same artifact role,
+platform, architecture and format against its last verified release. Measure
+the installed footprint separately. Include the byte delta and its source in
+review for changes to dependencies, bundled assets or packaging.
+
 [`package-app.sh`](../scripts/release/package-app.sh) owns installer collection,
 checksum roles and fresh signed application ZIPs. The release workflow passes the
 validated tag and target to that script; the existing signing and verification
 owners still control acceptance.
+
+The macOS ARM64 collector converts the manual DMG to ULMO (LZMA) before
+checksumming and signing the ZIP. It verifies the converted image and keeps
+it only when smaller. The ARM64 installer requires Apple silicon, which
+supports this disk-image format. Intel macOS keeps the original DMG format
+for older macOS installations. The updater payload is collected separately;
+the release verifier still checks that its executable matches the manual DMG.
+
+Linux release builds use XZ for DEB and RPM payloads. The AppImage filesystem
+uses Zstandard with larger blocks when recompression reduces the download and
+the full filesystem content and metadata match. The conversion precedes both
+installer collection and updater signing. The Windows download page offers the
+standalone NSIS executable when its detached update signature is published.
+Linux download pages can link directly to DEB, RPM and AppImage for the
+selected architecture. The standalone files carry exact-source provenance
+and must match their installer checksums in the signed platform ZIP.
+When the AppImage updater is published, the download page reuses it.
 
 Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
 to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and

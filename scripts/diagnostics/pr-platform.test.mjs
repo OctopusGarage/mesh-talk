@@ -269,8 +269,9 @@ test("related workflow changes select the same bounded Node diagnostics without 
 });
 
 
-test("all four Rust packages require explicit selectors for sources, manifests and build scripts", () => {
+test("all five Rust packages require explicit selectors for sources, manifests and build scripts", () => {
   const packages = [
+    ["protocol", "crates/mesh-talk-protocol", "protocolFilters"],
     ["core", "crates/mesh-talk-core", "coreFilters"],
     ["host", "src-tauri", "hostFilters"],
     ["integration", "crates/mesh-talk-integrations", "integrationFilters"],
@@ -290,7 +291,7 @@ test("all four Rust packages require explicit selectors for sources, manifests a
     for (const [kind] of packages) {
       assert.throws(() => buildPlan(parseFlags(all.filter((_, i) => Math.floor(i / 2) !== packages.findIndex(row => row[0] === kind))), [file]), new RegExp(`--${kind}-filter`));
     }
-    assert.equal(expectedSteps(buildPlan(parseFlags(all), [file])).filter(step => step.args[0] === "clippy").length, 4);
+    assert.equal(expectedSteps(buildPlan(parseFlags(all), [file])).filter(step => step.args[0] === "clippy").length, packages.length);
   }
 });
 

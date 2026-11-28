@@ -69,7 +69,7 @@ def normalize_bundle_markers(section):
     return re.sub(rb"__TAURI_BUNDLE_TYPE_VAR_(?:DEB|RPM|APP)", b"__TAURI_BUNDLE_TYPE_VAR_UNK", section)
 
 
-def appimage_executable(path):
+def appimage_payload_offset(path):
     # Follow AppImage/type2-runtime's read_elf64 offset calculation without
     # executing the runtime. Ubuntu's 7-Zip lacks some SquashFS compression codecs.
     total = path.stat().st_size
@@ -87,7 +87,11 @@ def appimage_executable(path):
         require(payload_offset + 96 <= total, "AppImage filesystem bounds")
         image.seek(payload_offset)
         require(image.read(4) == b"hsqs", "AppImage SquashFS signature")
-    return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(payload_offset), str(path), "usr/bin/mesh-talk"], timeout=60)
+    return payload_offset
+
+
+def appimage_executable(path):
+    return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(appimage_payload_offset(path)), str(path), "usr/bin/mesh-talk"], timeout=60)
 
 
 def elf_fingerprint(binary, platform=None):
@@ -310,6 +314,7 @@ def verify_archive(path, platform, version, check_installers, updater=None, delt
                     standalone_hash.update(block)
             require(standalone_hash.hexdigest() == checksums[name], "standalone updater checksum mismatch")
         installers = top
+        installer_checksums = {}
         installer_metadata = {}
         for extension in PLATFORMS[platform]:
             matches = [name for name in installers if name.endswith("." + extension)]
@@ -323,6 +328,7 @@ def verify_archive(path, platform, version, check_installers, updater=None, delt
                 for block in iter(lambda: source.read(1024 * 1024), b""):
                     digest.update(block)
             require(digest.hexdigest() == checksums[name], "installer checksum mismatch")
+            installer_checksums[extension] = checksums[name]
             if check_installers:
                 with tempfile.TemporaryDirectory(prefix="mesh-talk-installer-") as temporary:
                     installer = Path(temporary) / ("installer." + extension)
@@ -342,6 +348,7 @@ def verify_archive(path, platform, version, check_installers, updater=None, delt
         require(all(name.count("/") == 1 for name in files), "unexpected installer archive content")
         if check_installers and platform.startswith("linux_"):
             require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
+        return installer_checksums
 
 
 def verify_post_office_binary(binary, platform):
@@ -399,15 +406,21 @@ def verify_post_office_archive(path, platform, check_binaries):
                     require(entry.external_attr >> 16 & 0o111, "post-office binary is not executable")
 
 
-def verify_directory(root, tag, version, *, check_installers=True):
+def verify_directory(root, tag, version, *, check_installers=True, require_linux_downloads=False):
     root = Path(root)
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?", tag), "invalid artifact tag")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "invalid version")
     expected = {"mesh-talk.cdx.json"}
     with_updater = any(path.name.startswith("mesh-talk-update_") for path in root.iterdir())
+    with_linux_downloads = require_linux_downloads or any(
+        path.name.startswith("mesh-talk-installer_") for path in root.iterdir())
     for platform in PLATFORMS:
         name = f"mesh-talk_{tag}_{platform}.zip"
         expected.update((name, name + ".bundle"))
+        if with_linux_downloads and platform.startswith("linux_"):
+            expected.update(f"mesh-talk-installer_{tag}_{platform}.{extension}"
+                            for extension in PLATFORMS[platform]
+                            if extension != "AppImage" or not with_updater)
         if with_updater:
             update = updater_name(tag, platform)
             expected.update((update, update + ".sig"))
@@ -428,7 +441,18 @@ def verify_directory(root, tag, version, *, check_installers=True):
         archive = root / f"mesh-talk_{tag}_{platform}.zip"
         bundle = json.loads(Path(str(archive) + ".bundle").read_text())
         require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
-        verify_archive(archive, platform, version, check_installers, updater_name(tag, platform) if with_updater else None, delta_files.get(platform))
+        installers = verify_archive(archive, platform, version, check_installers, updater_name(tag, platform) if with_updater else None, delta_files.get(platform))
+        if with_linux_downloads and platform.startswith("linux_"):
+            for extension, digest in installers.items():
+                if extension == "AppImage" and with_updater:
+                    continue
+                standalone = root / f"mesh-talk-installer_{tag}_{platform}.{extension}"
+                require(standalone.stat().st_size <= MAX_UNCOMPRESSED, "standalone installer exceeds size limit")
+                with standalone.open("rb") as source:
+                    checksum = hashlib.sha256()
+                    for block in iter(lambda: source.read(1024 * 1024), b""):
+                        checksum.update(block)
+                require(checksum.hexdigest() == digest, "standalone installer differs from signed archive")
         relay_archive = root / f"mesh-talk-post-office_{tag}_{platform}.zip"
         relay_bundle = json.loads(Path(str(relay_archive) + ".bundle").read_text())
         require(isinstance(relay_bundle, dict) and relay_bundle.get("mediaType"), "invalid post-office signature bundle")
@@ -441,8 +465,10 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--require-linux-downloads", action="store_true")
     args = parser.parse_args()
-    for platform in verify_directory(args.directory, args.tag, args.version):
+    for platform in verify_directory(args.directory, args.tag, args.version,
+                                     require_linux_downloads=args.require_linux_downloads):
         print(f"{platform}: contents, checksums and installer metadata verified")
 
 

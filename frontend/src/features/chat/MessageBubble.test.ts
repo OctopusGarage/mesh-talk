@@ -16,13 +16,14 @@ function renderReactions(
   reactions: ReactionInfo[],
   readOnly = false,
   onMoreReactions?: () => void,
+  text = "Message",
 ) {
   return renderToStaticMarkup(
     createElement(MessageBubble, {
       m: {
         id: "target",
         who: "author",
-        text: "Message",
+        text,
         wallClock: Date.now(),
         fromMe: false,
         replyTo: null,
@@ -179,3 +180,16 @@ it.each([false, true])(
     expect(html).not.toContain("backdrop-blur-md");
   },
 );
+
+it("routes fenced messages to literal code cards rather than mention/link rendering", () => {
+  const html = renderReactions(
+    [],
+    false,
+    undefined,
+    "```html\n  <b>@alice https://example.com</b>\n```",
+  );
+  expect(html).toContain('data-testid="message-code-block"');
+  expect(html).toContain("&lt;b&gt;@alice https://example.com&lt;/b&gt;");
+  expect(html).not.toContain('href="https://example.com');
+  expect(html).toContain('data-testid="code-copy"');
+});

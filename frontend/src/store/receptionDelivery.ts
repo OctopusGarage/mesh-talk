@@ -28,6 +28,9 @@ export function createReceptionDelivery<Receipt>(
   let dirty = false;
   let active: Promise<void> | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
+  const firstRetryMs = options.retryMs ?? 1000;
+  const maxRetryMs = Math.max(firstRetryMs, 60_000);
+  let nextRetryMs = firstRetryMs;
   let cursor = options.cursor;
   let through: ReceptionCursor | null = null;
   let pending: {
@@ -78,6 +81,7 @@ export function createReceptionDelivery<Receipt>(
         if (!current()) return;
         const more = await options.acknowledge(work.page);
         if (!current()) return;
+        nextRetryMs = firstRetryMs;
         cursor = work.page.next;
         through = work.page.complete ? null : work.page.through;
         pending = null;
@@ -91,7 +95,8 @@ export function createReceptionDelivery<Receipt>(
       retry = setTimeout(() => {
         retry = null;
         void wake();
-      }, options.retryMs ?? 1000);
+      }, nextRetryMs);
+      nextRetryMs = Math.min(nextRetryMs * 2, maxRetryMs);
     }
   }
   function wake(): Promise<void> {

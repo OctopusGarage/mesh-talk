@@ -12,13 +12,70 @@ import type {
   DownloadProgress,
 } from "../types";
 
+export interface ProcessResourceReading {
+  pid: number;
+  birth: string;
+  cpu_ms: number;
+  resident_bytes: number | null;
+  disk_write_bytes: number | null;
+  io_write_bytes: number | null;
+}
+
+export interface MessageVolume {
+  count: number;
+  bytes: number;
+}
+
+export interface MessageResourceCounters {
+  accepted: number;
+  delivered: number;
+  rejected: number;
+  send_request_errors: number;
+  route_restarts: number;
+  direct_storage_holds: number;
+  relay_storage_holds: number;
+  attachments_accepted: number;
+  attachments_declined: number;
+  attempt_timeouts: number;
+  retries_scheduled: number;
+  received_direct: MessageVolume[];
+  received_group: MessageVolume[];
+  catch_up: number;
+  history_sync: number;
+  own_device_sync: number;
+  duplicate_direct_events: number;
+  attachments_verified: number;
+  verified_attachment_bytes: number;
+  delivery_latency: number[];
+}
+
+export interface HostResourceSample {
+  sampled_at_ms: number;
+  processes: ProcessResourceReading[];
+  bounded: boolean;
+  authenticated_channels: number;
+  sent_frame_bytes: number;
+  received_frame_bytes: number;
+  messages?: MessageResourceCounters;
+  direct_backlog?: [count: number, oldestMs: number | null] | null;
+}
+
 export const diag = {
   getPeers: () => invoke<DiagPeerInfo[]>("diag_get_peers"),
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),
   /** Force an immediate re-announce + rescan (manual "announce now"). */
   rescan: () => invoke<void>("rescan_peers"),
-  probeEndpoint: (host: string) =>
-    invoke<void>("probe_peer_endpoint", { host }),
+  probeEndpoint: (endpoint: string) => {
+    const address = endpoint.trim();
+    // A bare IPv6 literal has no port. Brackets disambiguate an IPv6 port.
+    const qualified =
+      /^\[([^\]]+)\](?::([0-9]{1,5}))?$/u.exec(address) ??
+      /^([^:]+):([0-9]{1,5})$/u.exec(address);
+    return invoke<void>("probe_peer_endpoint", {
+      host: qualified?.[1] ?? address,
+      port: qualified?.[2] === undefined ? undefined : Number(qualified[2]),
+    });
+  },
 };
 
 export const presence = {
@@ -39,6 +96,15 @@ export const presence = {
 /** Observability: logs + static environment facts for the Diagnostics dialog. */
 export const obs = {
   envInfo: () => invoke<EnvInfo>("env_info"),
+  startHostResourceSampling: () =>
+    invoke<number>("start_host_resource_sampling"),
+  hostResources: (ticket: number, includeBacklog: boolean) =>
+    invoke<HostResourceSample | null>("host_resource_sample", {
+      ticket,
+      includeBacklog,
+    }),
+  stopHostResourceSampling: (ticket: number) =>
+    invoke<void>("stop_host_resource_sampling", { ticket }),
   logsDir: () => invoke<string>("get_logs_dir"),
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),

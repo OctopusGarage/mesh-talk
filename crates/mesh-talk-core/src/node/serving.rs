@@ -3,10 +3,10 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::LogError;
-use crate::eventlog::event::{Author, ConversationId, EventId};
+use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
-    Served, SessionError, request_round_paged as request_round, serve_one_paged as serve_one,
+    Served, SessionError, request_legacy_turn_paged, request_range_round_paged,
     serve_wire_bytes_paged as serve_wire_bytes,
 };
 use crate::transport::SecureChannel;
@@ -16,6 +16,37 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
 mod mailbox_watch;
+
+type ChunkClaims = std::sync::Mutex<std::collections::HashSet<(Author, u32)>>;
+type PendingChunks = std::sync::Mutex<
+    std::collections::BTreeMap<
+        (u32, [u8; 32]),
+        (
+            crate::identity::device::PublicIdentity,
+            crate::eventlog::Event,
+        ),
+    >,
+>;
+
+#[derive(Default)]
+struct ChunkRound {
+    claims: ChunkClaims,
+    pending: PendingChunks,
+}
+
+struct ChunkClaim<'a> {
+    claims: &'a ChunkClaims,
+    key: (Author, u32),
+}
+
+impl Drop for ChunkClaim<'_> {
+    fn drop(&mut self) {
+        self.claims
+            .lock()
+            .expect("chunk claims lock")
+            .remove(&self.key);
+    }
+}
 
 /// Per-connection round ceiling for an inbound serve loop (matches the requester-side
 /// `MAX_SYNC_ROUNDS`); a real reconciliation converges far below this.
@@ -204,13 +235,24 @@ impl PostOfficeDrainSchedule {
         None
     }
 
-    fn completed(&mut self, key: DrainKey, result: Option<bool>, now: tokio::time::Instant) {
+    fn completed(
+        &mut self,
+        key: DrainKey,
+        result: Option<bool>,
+        source_changed: bool,
+        now: tokio::time::Instant,
+    ) {
         if result == Some(true) && self.primary.is_none() {
             self.primary = Some(key.clone());
         } else if result != Some(true) && self.primary.as_ref() == Some(&key) {
             self.primary = None;
         }
         self.due.retain(|(candidate, _)| candidate != &key);
+        // A dirty active exchange needs an immediate follow-up. A turn
+        // without any attributable scope keeps its ordinary retry deadline.
+        if source_changed && result.is_some() {
+            return;
+        }
         if self.due.len() >= MAX_DRAIN_DUE_ENTRIES {
             self.due.pop_front();
         }
@@ -263,6 +305,8 @@ impl Node {
         if peer.post_office {
             return Err(SessionError::UnexpectedMessage);
         }
+        let is_dm =
+            conv == super::conversation::dm_conversation_id(&self.identity.public(), &peer.public);
         for fresh in [false, true] {
             let (mut channel, reused) = if fresh {
                 self.privacy_dial(peer.addr, &peer.public)
@@ -277,15 +321,17 @@ impl Node {
             let _reception = self
                 .request_reception_scope(&store, &channel)
                 .ok_or(SessionError::UnexpectedMessage)?;
-            let result = request_round(&mut channel, &store, conv).await;
+            // Explicit DM control and manifest callers expect this exchange
+            // to finish within the existing compatibility-turn budget.
+            let result = if is_dm {
+                request_legacy_turn_paged(&mut channel, &store, conv).await
+            } else {
+                request_range_round_paged(&mut channel, &store, conv).await
+            };
             self.dispatch_received_sync_work(&store);
             match result {
                 Ok(_) => {
-                    if conv
-                        == super::conversation::dm_conversation_id(
-                            &self.identity.public(),
-                            &peer.public,
-                        )
+                    if is_dm
                         && !self.certified_sibling(&peer.public)
                         && self.file_identity_capability_due(peer.addr, &peer.public)
                     {
@@ -651,28 +697,62 @@ impl Node {
         inbound.shutdown().await;
     }
 
-    async fn run_expiry_loop(self: Arc<Self>) {
+    pub(in crate::node) async fn run_expiry_loop(self: Arc<Self>) {
+        const CLOCK_CHECK: Duration = Duration::from_secs(1);
+        const QUIET_REPAIR: Duration = Duration::from_secs(300);
+        let mut source = self.storage.database().subscribe_source_changes();
+        let mut journal = self
+            .delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .subscribe_expiry_changes();
+        let mut favorites = self
+            .favorites
+            .lock()
+            .expect("favorites mutex")
+            .subscribe_changes();
+        let mut needs_clock_check = true;
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let next_allowed = tokio::time::Instant::now() + CLOCK_CHECK;
+            if !needs_clock_check {
+                tokio::select! {
+                    result = source.changed() => { if result.is_err() { return; } }
+                    result = journal.changed() => { if result.is_err() { return; } }
+                    result = favorites.changed() => { if result.is_err() { return; } }
+                    _ = tokio::time::sleep(QUIET_REPAIR) => {}
+                }
+            }
+            // Bound sustained write traffic to the previous maintenance cadence.
+            // Active deadlines keep the one-second bound for forward wall-clock jumps.
+            tokio::time::sleep_until(next_allowed).await;
+            source.borrow_and_update();
+            journal.borrow_and_update();
+            favorites.borrow_and_update();
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
             let node = Arc::clone(&self);
-            match work
+            needs_clock_check = match work
                 .spawn_blocking(move || {
                     #[cfg(test)]
                     if let Some(hook) = node.expiry_cleanup_hook.lock().unwrap().take() {
                         hook();
                     }
-                    node.prune_expired_received()
+                    node.clean_expiry()
                 })
                 .await
                 .map(|value| value.into_inner())
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
-                Err(error) => log::warn!("message expiry task failed: {error}"),
-            }
+                Ok(Ok((_, has_deadlines))) => has_deadlines,
+                Ok(Err(error)) => {
+                    log::warn!("message expiry cleanup failed: {error}");
+                    true
+                }
+                Err(error) => {
+                    log::warn!("message expiry task failed: {error}");
+                    true
+                }
+            };
         }
     }
 
@@ -774,9 +854,14 @@ impl Node {
                         accepted.is_ok()
                     )
                 });
+                #[cfg(test)]
+                if let Err(error) = &accepted {
+                    node.trace_account_client(&node.identity.public(), || {
+                        format!("history_wire_failed outcome=admission error={error}")
+                    });
+                }
                 if let Ok(channel) = accepted {
-                    node.serve_connection_with_capacity(channel, Some(capacity))
-                        .await;
+                    Box::pin(node.serve_connection_with_capacity(channel, Some(capacity))).await;
                 }
                 #[cfg(test)]
                 node.trace_account_client(&node.identity.public(), || {
@@ -793,7 +878,7 @@ impl Node {
     /// Direct protocol hosts own their own concurrent connection admission.
     /// The production listener supplies its retained semaphore capacity below.
     pub async fn serve_connection(self: &Arc<Self>, channel: SecureChannel<TcpStream>) {
-        self.serve_connection_with_capacity(channel, None).await;
+        Box::pin(self.serve_connection_with_capacity(channel, None)).await;
     }
 
     async fn serve_connection_with_capacity(
@@ -1040,7 +1125,9 @@ impl Node {
             if !channel.io_admitted() {
                 return;
             }
-            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
+            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
+                || !self.call_privacy_allowed(&channel, &signal)
+            {
                 return;
             }
             if self.serve_call_signal(&channel, signal).is_err() {
@@ -1051,26 +1138,102 @@ impl Node {
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.
-        let result = tokio::time::timeout(
-            SERVE_IDLE_TIMEOUT,
-            serve_wire_bytes(&mut channel, &store, &first),
-        )
+        let mut range_state = super::session::range_sync::Service::default();
+        let mut recent_state = super::session::recent_history::Service::default();
+        let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
+            if let Some(result) = Box::pin(super::session::recent_history::serve(
+                &mut channel,
+                &store,
+                &mut recent_state,
+                &first,
+            ))
+            .await?
+            {
+                return Ok(result);
+            }
+            if let Some(result) = Box::pin(super::session::range_sync::serve(
+                &mut channel,
+                &store,
+                &mut range_state,
+                &first,
+            ))
+            .await?
+            {
+                Ok(result)
+            } else {
+                serve_wire_bytes(&mut channel, &store, &first).await
+            }
+        })
         .await;
         self.dispatch_received_sync_work(&store);
         if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+            #[cfg(test)]
+            if let Ok(Err(error)) = &result {
+                self.trace_account_client(channel.peer_identity(), || {
+                    format!(
+                        "history_wire_failed outcome=error frame={:02x?} error={error}",
+                        first.get(..4)
+                    )
+                });
+            }
+            range_state.retire(&store);
+            recent_state.retire(&store);
             return;
         }
         for _ in 0..MAX_SERVE_ROUNDS {
             if is_relay && !self.relay_allowed(channel.peer_identity()) {
                 break;
             }
-            let result =
-                tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await;
+            #[cfg(test)]
+            let mut frame_tag = [0_u8; 4];
+            let result = tokio::time::timeout(SERVE_IDLE_TIMEOUT, async {
+                let bytes = match channel.recv().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(Served::Closed),
+                };
+                #[cfg(test)]
+                if let Some(tag) = bytes.get(..4) {
+                    frame_tag.copy_from_slice(tag);
+                }
+                if let Some(result) = Box::pin(super::session::recent_history::serve(
+                    &mut channel,
+                    &store,
+                    &mut recent_state,
+                    &bytes,
+                ))
+                .await?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) = Box::pin(super::session::range_sync::serve(
+                    &mut channel,
+                    &store,
+                    &mut range_state,
+                    &bytes,
+                ))
+                .await?
+                {
+                    Ok(result)
+                } else {
+                    serve_wire_bytes(&mut channel, &store, &bytes).await
+                }
+            })
+            .await;
             self.dispatch_received_sync_work(&store);
             if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+                #[cfg(test)]
+                if let Ok(Err(error)) = &result {
+                    self.trace_account_client(channel.peer_identity(), || {
+                        format!(
+                            "history_wire_failed outcome=error frame={frame_tag:02x?} error={error}"
+                        )
+                    });
+                }
                 break; // peer closed, error, or idle past the timeout
             }
         }
+        range_state.retire(&store);
+        recent_state.retire(&store);
     }
 
     pub(in crate::node) fn request_reception_scope<'a, 'node>(
@@ -1262,6 +1425,7 @@ impl Node {
                     continue;
                 };
                 if self.certified_sibling(&proof.public())
+                    || !self.personal_peer_allowed(&proof.public(), Some(&proof))
                     || conv
                         != super::conversation::dm_conversation_id(
                             &self.identity.public(),
@@ -1385,8 +1549,16 @@ impl Node {
                                 }
                             };
                             let mut received = self.file_progress(fc)?.map(|progress| progress.done);
-                            let mut pulls = stream::iter(candidates)
-                                .map(|peer| async move {
+                            // A replica can hold the original author's signed
+                            // blocks even though it did not issue its own offer.
+                            let signed_author = self.incoming_offer(fc, None, None)?
+                                .map(|(_, _, _, source)| Author::from_ed25519(source.ed25519_pub));
+                            let source_count = candidates.len() as u32;
+                            let chunk_base = received.unwrap_or(0);
+                            let round = ChunkRound::default();
+                            let round = &round;
+                            let mut pulls = stream::iter(candidates.into_iter().enumerate())
+                                .map(|(source, peer)| async move {
                                     let _ = tokio::time::timeout(
                                         super::delivery_runtime::FILE_EXCHANGE_TIMEOUT,
                                         async {
@@ -1453,6 +1625,36 @@ impl Node {
                                             }
                                         }
                                     }
+                                            match self.try_pull_signed_file_chunk(
+                                                &mut channel, &store, fc, signed_author,
+                                                (chunk_base, source as u32, source_count, round),
+                                            ).await {
+                                                Ok(true) => {
+                                                    self.recycle_sync_channel(channel);
+                                                    return;
+                                                }
+                                                Ok(false) => {}
+                                                Err(error) => {
+                                                    log::debug!("signed chunk request deferred: {error}");
+                                                    drop(channel);
+                                                    let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
+                                                        return;
+                                                    };
+                                                    channel = reconnected;
+                                                }
+                                            }
+                                            if !matches!(
+                                                self.attachment_consent_status(fc),
+                                                Ok(Some(super::attachment_consent::ReceiveDecision::Accepted))
+                                            ) {
+                                                return;
+                                            }
+                                            if self.file_progress(fc).is_ok_and(|progress| {
+                                                progress.is_some_and(|progress| progress.done >= progress.total)
+                                            }) {
+                                                self.recycle_sync_channel(channel);
+                                                return;
+                                            }
                                             if super::session::request_file_round_paged(
                                                 &mut channel,
                                                 &store,
@@ -1481,6 +1683,10 @@ impl Node {
                                 if progress.is_some_and(|p| p.done >= p.total) {
                                     break;
                                 }
+                            }
+                            drop(pulls);
+                            if let Err(error) = self.retry_round_file_chunks(fc, round) {
+                                log::debug!("staged signed chunks deferred: {error}");
                             }
                         }
                         if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
@@ -1515,6 +1721,185 @@ impl Node {
         if let Err(error) = result {
             log::warn!("pull_pending_files deferred after storage failure: {error}");
         }
+    }
+
+    async fn try_pull_signed_file_chunk<
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    >(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        store: &std::sync::Mutex<impl crate::eventlog::sync::network::NetworkSyncStore>,
+        file: ConversationId,
+        author: Option<Author>,
+        lane: (u32, u32, u32, &ChunkRound),
+    ) -> Result<bool, SessionError> {
+        let Some(author) = author else {
+            return Ok(false);
+        };
+        let Some(progress) = self
+            .file_progress(file)
+            .map_err(|_| SessionError::UnexpectedMessage)?
+        else {
+            return Ok(false);
+        };
+        if progress.done >= progress.total {
+            return Ok(false);
+        }
+        let (base, source, source_count, round) = lane;
+        let claims = &round.claims;
+        let count = progress.total.saturating_sub(base).min(source_count * 4);
+        if count == 0 {
+            return Ok(false);
+        }
+        let Some(availability) =
+            super::session::request_signed_chunk_availability(channel, file, author, base, count)
+                .await?
+        else {
+            return Ok(false);
+        };
+        let preferred = (source..count).step_by(source_count as usize);
+        let alternatives = (0..count).filter(|offset| offset % source_count != source);
+        let mut requested = 0;
+        for offset in preferred.chain(alternatives) {
+            if requested == 4 {
+                break;
+            }
+            if !availability[offset as usize] {
+                continue;
+            }
+            let index = base + offset;
+            let key = (author, index);
+            let pending_key = (index, *author.ed25519_pub());
+            if round
+                .pending
+                .lock()
+                .expect("pending chunk lock")
+                .contains_key(&pending_key)
+            {
+                continue;
+            }
+            if !claims.lock().expect("chunk claims lock").insert(key) {
+                continue;
+            }
+            let _claim = ChunkClaim { claims, key };
+
+            if self
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .authored_header(&file, author, u64::from(index) + 1)?
+                .is_some_and(|header| header.kind == EventKind::Message)
+            {
+                continue;
+            }
+            if !matches!(
+                self.attachment_consent_status(file)?,
+                Some(super::attachment_consent::ReceiveDecision::Accepted)
+            ) {
+                break;
+            }
+            requested += 1;
+            let Some(event) =
+                super::session::request_signed_chunk(channel, file, author, index).await?
+            else {
+                continue;
+            };
+            if !matches!(
+                self.attachment_consent_status(file)?,
+                Some(super::attachment_consent::ReceiveDecision::Accepted)
+            ) {
+                break;
+            }
+            // The ordinary image admission expects chunk one first. Keep a
+            // verified later block in the same finite window until its exact
+            // predecessor arrives, then apply normal admission unchanged.
+            if let [parent] = event.parents.as_slice()
+                && !self.log.lock().expect("log lock").has(parent)?
+                && event.is_canonical()
+                && event.verify_integrity()
+                && event.verify_signature()
+                && self.attachment_chunk_author_allowed(file, author.ed25519_pub())?
+            {
+                round
+                    .pending
+                    .lock()
+                    .expect("pending chunk lock")
+                    .insert(pending_key, (channel.peer_identity().clone(), event));
+                continue;
+            }
+            let admission = store.lock().expect("sync store lock").ingest(event.clone());
+            match admission {
+                Ok(_) => self.retry_round_file_chunks(file, round)?,
+                Err(LogError::MissingParents(_))
+                    if event.is_canonical()
+                        && event.verify_integrity()
+                        && event.verify_signature() =>
+                {
+                    round
+                        .pending
+                        .lock()
+                        .expect("pending chunk lock")
+                        .insert(pending_key, (channel.peer_identity().clone(), event));
+                }
+                Err(error) if error.is_peer_rejection() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.retry_round_file_chunks(file, round)?;
+        self.file_progress(file)
+            .map(|current| current.is_some_and(|current| current.done > progress.done))
+            .map_err(|_| SessionError::UnexpectedMessage)
+    }
+
+    fn retry_round_file_chunks(
+        &self,
+        file: ConversationId,
+        round: &ChunkRound,
+    ) -> Result<(), SessionError> {
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        // Drain the finite window in author/sequence order. Keeping the round
+        // guard serializes competing replays without holding it during I/O.
+        let mut pending = round.pending.lock().expect("pending chunk lock");
+        let mut failure = None;
+        pending.retain(|_, (peer, event)| {
+            if failure.is_some() {
+                return true;
+            }
+            match self.attachment_consent_status(file) {
+                Ok(Some(super::attachment_consent::ReceiveDecision::Accepted)) => {}
+                Ok(_) => return false,
+                Err(error) => {
+                    failure = Some(error);
+                    return true;
+                }
+            }
+            if let [parent] = event.parents.as_slice() {
+                match self.log.lock().expect("log lock").has(parent) {
+                    Ok(true) => {}
+                    Ok(false) => return true,
+                    Err(error) => {
+                        failure = Some(error);
+                        return true;
+                    }
+                }
+            }
+            let store = self.sync_store(peer);
+            let admission = NetworkSyncStore::ingest(
+                &mut *store.lock().expect("sync store lock"),
+                event.clone(),
+            );
+            match admission {
+                Ok(_) => false,
+                Err(LogError::MissingParents(_)) => true,
+                Err(error) if error.is_peer_rejection() => false,
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            }
+        });
+        failure.map_or(Ok(()), |error| Err(error.into()))
     }
 
     fn file_recovery_sources(
@@ -1774,28 +2159,67 @@ impl Node {
         channel: ConversationId,
     ) -> Result<(), NodeError> {
         loop {
-            match self.prepare_channel_metadata_turn(channel) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(LogError::StaleCursor) => {
-                    // The source may change between bounded preparation and
-                    // installation. Retry only while this exact participant
-                    // owner is still valid; adoption also returns StaleCursor.
-                    self.channel_checkpoints.check_account()?;
-                    // Physical retirement may have finished before derived
-                    // checkpoint cleanup. That empty source cannot advance.
-                    let retained = self
-                        .log
-                        .lock()
-                        .expect("log lock")
-                        .repository()?
-                        .metadata(&channel)?
-                        .is_some_and(|metadata| metadata.count > 0);
-                    if !retained {
-                        return Err(LogError::StaleCursor.into());
-                    }
+            if self.prepare_channel_metadata_wait_turn(channel)? {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn prepare_channel_metadata_wait_turn(
+        &self,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        match self.prepare_channel_metadata_turn(channel) {
+            Ok(ready) => Ok(ready),
+            Err(LogError::StaleCursor) => {
+                // The source may change between bounded preparation and
+                // installation. Retry only while this exact participant
+                // owner is still valid; adoption also returns StaleCursor.
+                self.channel_checkpoints.check_account()?;
+                // Physical retirement may have finished before derived
+                // checkpoint cleanup. That empty source cannot advance.
+                let retained = self
+                    .log
+                    .lock()
+                    .expect("log lock")
+                    .repository()?
+                    .metadata(&channel)?
+                    .is_some_and(|metadata| metadata.count > 0);
+                if !retained {
+                    return Err(LogError::StaleCursor);
                 }
-                Err(error) => return Err(error.into()),
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Runtime recovery must keep the transport reactor free even when a
+    /// bounded metadata turn is waiting for a contended synchronous store.
+    pub(in crate::node) async fn await_channel_metadata_owned(
+        self: &Arc<Self>,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        loop {
+            // This is a bounded leaf of an already-owned control/fanout lane,
+            // not a top-level maintenance turn. Taking the serial repair slot
+            // here would couple network progress to unrelated local maintenance.
+            let work = self
+                .runtime_work
+                .admit()
+                .ok_or_else(|| LogError::AdmissionRejected("participant runtime retired".into()))?;
+            let node = self.clone();
+            let ready = match work
+                .spawn_blocking(move || node.prepare_channel_metadata_wait_turn(channel))
+                .await
+            {
+                Ok(value) => value.into_inner()?,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(error) => return Err(LogError::Io(std::io::Error::other(error)).into()),
+            };
+            if ready {
+                return Ok(());
             }
             tokio::task::yield_now().await;
         }
@@ -2302,8 +2726,9 @@ impl Node {
                 self.trace_account_client(&self.identity.public(), || {
                     format!("channel_recovery_plaintext_selected {channel:?}")
                 });
-                if let Err(error) = self.process_channel_recovery_local(channel) {
-                    local_failed = true;
+                let result = self.process_channel_recovery_local(channel);
+                local_failed = result.is_err();
+                if let Err(error) = result {
                     log::warn!("channel local recovery deferred: {error}");
                 }
             }
@@ -2395,6 +2820,9 @@ impl Node {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             self.post_office_candidates(&roster)
         };
+        if post_offices.is_empty() {
+            return;
+        }
         use futures_util::stream::{self, StreamExt};
         let peers = self.post_office_drain_peers();
         if peers.is_empty() {
@@ -2412,12 +2840,17 @@ impl Node {
     }
 
     fn post_office_drain_peers(&self) -> Vec<crate::discovery::Announce> {
-        let mut peers = self
-            .historical_dm_peers()
-            .into_iter()
-            .filter(|peer| self.verified_dm_pull_peer(&peer.public().user_id()))
-            .collect::<Vec<_>>();
-        peers.extend(self.group_mailbox_peers());
+        let proofs = self.historical_peer_proofs();
+        let mut peers: Vec<_> = proofs
+            .iter()
+            .filter(|proof| {
+                self.historical_dm_peer_allowed(proof)
+                    && self.personal_peer_allowed(&proof.public(), Some(proof))
+                    && self.verified_dm_pull_peer(&proof.public().user_id())
+            })
+            .cloned()
+            .collect();
+        peers.extend(self.group_mailbox_peers(&proofs));
         peers.sort_unstable_by_key(|peer| peer.public().user_id());
         peers.dedup_by_key(|peer| peer.public().user_id());
         peers
@@ -2451,6 +2884,7 @@ impl Node {
             .copied()
             .unwrap_or(0);
         let mut success = true;
+        let mut exchange_error = None;
         for offset in 0..peers.len().min(8) {
             let index = start.wrapping_add(offset) % peers.len();
             // Record the turn before awaiting. Neither a huge mailbox
@@ -2524,6 +2958,7 @@ impl Node {
                 self.observe_mailbox_work(reason, None);
             }
             if !matches!(result, Ok(Ok(()))) {
+                exchange_error = result.ok().and_then(Result::err);
                 success = false;
                 channel = None;
                 break;
@@ -2532,8 +2967,10 @@ impl Node {
         if let Some(channel) = channel {
             self.recycle_sync_channel(channel);
         }
-        self.record_relay_attempt(&po.public, success);
-        success
+        self.record_relay_attempt_result(
+            &po.public,
+            exchange_error.as_ref().map_or(Ok(success), Err),
+        )
     }
 
     /// Decrypt (via the Double Ratchet) and emit any not-yet-emitted, non-self
@@ -3120,6 +3557,26 @@ mod post_office_drain_schedule_tests {
     }
 
     #[test]
+    fn empty_dirty_drain_retains_deadline_while_active_scope_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let candidates = candidates(&node, 1);
+        let mut schedule = PostOfficeDrainSchedule::default();
+        let key = candidates[0].0.clone();
+        let now = tokio::time::Instant::now();
+
+        schedule.completed(key.clone(), None, true, now);
+        assert!(schedule.select(&candidates, &[], now).is_none());
+        assert_eq!(
+            schedule.select(&candidates, &[], now + POST_OFFICE_DRAIN_INTERVAL),
+            Some(0)
+        );
+
+        schedule.completed(key, Some(true), true, now);
+        assert_eq!(schedule.select(&candidates, &[], now), Some(0));
+    }
+
+    #[test]
     fn drain_work_identity_ignores_preference_but_preserves_endpoint_and_authority_changes() {
         let dir = tempfile::tempdir().unwrap();
         let node = node(dir.path());
@@ -3172,7 +3629,7 @@ mod post_office_drain_schedule_tests {
         active.push(candidates[1].0.clone());
         assert_eq!(schedule.select(&candidates, &active, now), None);
         active.pop();
-        schedule.completed(candidates[1].0.clone(), Some(true), now);
+        schedule.completed(candidates[1].0.clone(), Some(true), false, now);
         assert_eq!(
             schedule.select(&candidates, &active, now),
             None,
@@ -3185,12 +3642,12 @@ mod post_office_drain_schedule_tests {
         let next = now + POST_OFFICE_DRAIN_INTERVAL;
         assert_eq!(schedule.select(&candidates, &active, next), Some(1));
         active.clear();
-        schedule.completed(candidates[0].0.clone(), Some(true), next);
-        schedule.completed(candidates[1].0.clone(), Some(true), next);
+        schedule.completed(candidates[0].0.clone(), Some(true), false, next);
+        schedule.completed(candidates[1].0.clone(), Some(true), false, next);
         assert_eq!(schedule.select(&candidates, &active, next), Some(2));
-        schedule.completed(candidates[2].0.clone(), Some(true), next);
+        schedule.completed(candidates[2].0.clone(), Some(true), false, next);
         assert_eq!(schedule.select(&candidates, &active, next), Some(3));
-        schedule.completed(candidates[1].0.clone(), Some(false), next);
+        schedule.completed(candidates[1].0.clone(), Some(false), false, next);
         assert!(
             schedule.primary.is_none(),
             "an actual failure yields the primary role"
@@ -3205,7 +3662,7 @@ mod post_office_drain_schedule_tests {
         let now = tokio::time::Instant::now();
         let mut schedule = PostOfficeDrainSchedule::default();
         for (key, _) in &candidates[..MAX_DRAIN_DUE_ENTRIES] {
-            schedule.completed(key.clone(), None, now);
+            schedule.completed(key.clone(), None, false, now);
         }
         assert_eq!(schedule.due.len(), MAX_DRAIN_DUE_ENTRIES);
         assert_eq!(schedule.select(&candidates, &[], now), None);

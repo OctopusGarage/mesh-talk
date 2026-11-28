@@ -52,8 +52,8 @@ jobs:
     uses: ./.github/workflows/ui-shards.yml
     with:
       operating_systems: '["macos-26-intel"]'
-      shards: '[1,2,3,4,5,6,7,8]'
-      shard_total: 8
+      shards: '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]'
+      shard_total: 16
 
   desktop-windows:
     if: needs.scope.outputs.full == 'true'
@@ -105,17 +105,17 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
-          pattern: ui-coverage-*-${{ github.run_attempt }}
+          pattern: ui-coverage-*
           path: target/ui-coverage
       - name: Download this run's unit coverage
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
-          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-*
           path: target/ui-unit-coverage
       - name: Validate unit coverage provenance and restore line map
         if: ${{ steps.scope.outputs.full == 'true' }}
-        run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
+        run: node ../scripts/ci/unit-coverage-artifact.mjs restore-latest ../target/ui-unit-coverage coverage/lcov.info
       - name: Validate and collect all coverage parts
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: node ../scripts/ci/collect-ui-coverage.mjs ../target/ui-coverage coverage/e2e-parts "$SOURCE_SHA" 4
@@ -166,7 +166,7 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
-          pattern: chromium-portable-*-${{ github.run_attempt }}
+          pattern: chromium-portable-*
           path: target/chromium-portable
       - name: Validate every OS and the complete portable inventory
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -202,7 +202,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v8
         with:
-          pattern: playwright-ui-*-${{ github.run_attempt }}
+          pattern: playwright-ui-*
           path: target/ui-reports
       - name: Render each OS report from its raw blobs
         env:

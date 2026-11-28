@@ -1,6 +1,6 @@
 //! Mesh-Talk core — the serverless, end-to-end-encrypted LAN messaging protocol.
 //!
-//! This crate is UI-free and embeddable: it is the foundation an SDK builds on. It
+//! This application crate is UI-free and embeddable. It composes Mesh Foundation mechanisms and
 //! provides the whole protocol stack and nothing about any particular front end:
 //!
 //! - [`identity`] — Ed25519/X25519 device identities, accounts, and device certificates.

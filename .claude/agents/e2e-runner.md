@@ -27,9 +27,10 @@ poll long-running commands while providing progress updates.
 
 ## Failure triage
 
-1. Early EOF/startup failure: inspect stderr and isolated profile paths. Shared
-   keystore/store directories can create a rig error; an actual panic may be a
-   product bug.
+1. Unexpected node exit: identify the node role and process, capture its exit
+   status or signal and relevant stderr, and report whether it died before
+   readiness or after readiness relative to the failing assertion. For startup
+   failures, check whether the fixture reused a keystore or store directory.
 2. Deadline exceeded: inspect machine load and readiness. Repeat only the failing
    scenario to distinguish contention from a reproducible timeout.
 3. Discovery failure: distinguish blocked UDP/interface/ACL conditions and

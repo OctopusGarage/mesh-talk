@@ -441,7 +441,7 @@ it("keeps repeated roster pages out of document and full group refreshes", async
       "roster",
       ["unknown"],
       { roster: true },
-      Array(7).fill("roster"),
+      Array(8).fill("roster"),
     ]) {
       kinds = malformed;
       invoke.mockClear();
@@ -1000,6 +1000,8 @@ it("reuses account reads for unchanged heartbeat facts and retries failed change
       { name: "Renamed" },
       { user_id: "replacement" },
       { account_id: "rebound" },
+      { online: true },
+      { online: false },
       { post_office: true },
     ]) {
       peers = peers.map((peer, index) =>
@@ -1026,6 +1028,82 @@ it("reuses account reads for unchanged heartbeat facts and retries failed change
     useChat.setState((state) => ({ identityEpoch: state.identityEpoch + 1 }));
     await heartbeat();
     expect(count()).toBe(++before);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("restores expired contacts on online transitions without reloading unchanged heartbeats", async () => {
+  vi.useFakeTimers();
+  let online = false;
+  let reads = 0;
+  let offlineDeadline = 0;
+  invoke.mockImplementation((command: string) => {
+    const identity = { owner: "host", device_id: "me", account_id: "myacct" };
+    const peers = [
+      {
+        user_id: "peer",
+        account_id: "friend",
+        name: "Friend",
+        post_office: false,
+        addr: "same",
+        online,
+      },
+    ];
+    if (command === "owner_node_identity") return Promise.resolve(identity);
+    if (command === "list_peers") return Promise.resolve(peers);
+    if (command === "owner_roster_observation")
+      return Promise.resolve({ identity, peers, people: {} });
+    if (command === "list_accounts") {
+      reads++;
+      return Promise.resolve(
+        online || Date.now() < offlineDeadline
+          ? [
+              {
+                account_id: "friend",
+                names: ["Friend"],
+                device_count: 1,
+                contact_expires_at_ms: online ? null : offlineDeadline,
+              },
+            ]
+          : [],
+      );
+    }
+    return Promise.resolve([]);
+  });
+  const heartbeat = async () => {
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().accounts).toEqual([]);
+    const initialReads = reads;
+    online = true;
+    await heartbeat();
+    expect(useChat.getState().accounts.map((row) => row.account_id)).toEqual([
+      "friend",
+    ]);
+    expect(reads).toBe(initialReads + 1);
+    await heartbeat();
+    expect(reads).toBe(initialReads + 1);
+    online = false;
+    offlineDeadline = Date.now() + 400;
+    await heartbeat();
+    expect(useChat.getState().accounts[0].contact_expires_at_ms).toBe(
+      offlineDeadline,
+    );
+    expect(reads).toBe(initialReads + 2);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(useChat.getState().accounts).toEqual([]);
+    expect(reads).toBe(initialReads + 3);
   } finally {
     stop();
     vi.useRealTimers();
@@ -1644,6 +1722,36 @@ it("refreshes channel member snapshots for group avatars", async () => {
   const first = useChat.getState().channelMembersById;
   await useChat.getState().refreshRoster();
   expect(useChat.getState().channelMembersById).toBe(first);
+});
+
+it("defers hidden roster repair of group members while preserving explicit refresh", async () => {
+  vi.stubGlobal("document", { visibilityState: "hidden" });
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "owner_node_identity")
+      return { owner: "host", device_id: "me", account_id: "myacct" };
+    if (command === "list_channels")
+      return [
+        { channel_id: "team", name: "Team", owner: "me", member_count: 1 },
+      ];
+    if (command === "channel_members")
+      return { owner: "me", members: [{ user_id: "peer", name: "Alice" }] };
+    return [];
+  });
+  try {
+    await useChat.getState().refreshRoster();
+    expect(
+      invoke.mock.calls.some(([command]) => command === "list_accounts"),
+    ).toBe(true);
+    expect(
+      invoke.mock.calls.some(([command]) => command === "channel_members"),
+    ).toBe(false);
+    await useChat.getState().refreshChannels("team");
+    expect(useChat.getState().channelMembersById.team).toEqual([
+      { user_id: "peer", name: "Alice" },
+    ]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it("reports a failed member removal to the dialog", async () => {
@@ -2687,6 +2795,34 @@ describe("conversation cache LRU", () => {
     await useChat.getState().open({ kind: "account", id: "a0", name: "x" });
     expect(useChat.getState().messages["account:a0"]).toHaveLength(1);
     expect(useChat.getState().messages["account:a0"][0].text).toBe("back");
+  });
+
+  it("evicts inactive message payloads before reaching the conversation count limit", async () => {
+    const text = "x".repeat(3 * 1024 * 1024);
+    invoke.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "owner_account_history"
+          ? [
+              {
+                id: "retained-message",
+                from_me: false,
+                who: "alice",
+                text,
+                wall_clock: 1,
+                reply_to: null,
+              },
+            ]
+          : [],
+      ),
+    );
+    for (const id of ["first", "second", "active"]) {
+      await useChat.getState().open({ kind: "account", id, name: id });
+    }
+    const { messages, cacheOrder } = useChat.getState();
+    expect(cacheOrder).toEqual(["account:second", "account:active"]);
+    expect(messages["account:first"]).toBeUndefined();
+    expect(messages["account:second"][0].text).toBe(text);
+    expect(messages["account:active"][0].text).toBe(text);
   });
 
   it("keeps unread counts while evicting cached conversation state", async () => {
@@ -6064,6 +6200,45 @@ it("hydrates verified startup identity and persisted reception before full runti
   }
 });
 
+it("observes installed runtime readiness on a matching reception wake before the repair timer", async () => {
+  vi.useFakeTimers();
+  let available = false;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return available
+        ? Promise.resolve({
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+          })
+        : Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity") return Promise.resolve(null);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  const hint = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "one",
+  };
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(false);
+    available = true;
+    captured.current!.onReceptionWake({ ...hint, owner: "other-host" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(false);
+
+    captured.current!.onReceptionWake(hint);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
 it("revokes staged appearance identity on a new pending or failed startup ticket", async () => {
   vi.useFakeTimers();
   let snapshot = {
@@ -7748,7 +7923,7 @@ it("keeps roster reconciliation quiet with native push after startup", async () 
   }
 });
 
-it.each(["documents", "sync_status"])(
+it.each(["documents", "sync_status", "read_receipts"])(
   "keeps qualified %s reception changes out of settled group and personal queries",
   async (domain) => {
     vi.useFakeTimers();
@@ -7944,7 +8119,22 @@ it.each(["held", "failed"])(
   "shares one ordinary roster observation while %s group work cannot block chat",
   async (mode) => {
     vi.useFakeTimers();
-    const identity = { owner: "host", account_id: "myacct", device_id: "me" };
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    const page = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    vi.stubGlobal("document", page);
+    const scope = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      runtime_id: "installed",
+    };
+    const identity = { ...scope, supports_bounded_delivery: true };
     const peer = {
       user_id: "friend-device",
       account_id: "friend",
@@ -7956,6 +8146,28 @@ it.each(["held", "failed"])(
     let rejectGroup!: (error: Error) => void;
     invoke.mockImplementation((command: string) => {
       if (command === "owner_node_identity") return Promise.resolve(identity);
+      if (command === "owner_startup_identity")
+        return Promise.resolve({
+          ...scope,
+          startup_id: scope.runtime_id,
+          phase: "ready",
+        });
+      if (command === "owner_reception_page") {
+        const cursor = {
+          epoch: "0123456789abcdef0123456789abcdef",
+          sequence: "0",
+        };
+        return Promise.resolve({
+          scope,
+          token: "initial",
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [],
+        });
+      }
+      if (command === "owner_reception_ack") return Promise.resolve(false);
       if (command === "get_presence")
         return Promise.resolve({
           people: {},
@@ -7986,8 +8198,28 @@ it.each(["held", "failed"])(
     const stopPresence = usePresence.getState().start();
     try {
       await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState()).toMatchObject({
+        ready: true,
+        deliveryRuntime: scope.runtime_id,
+      });
       invoke.mockClear();
-      captured.current?.onStateChanged({ ...identity, kind: "roster" });
+      captured.current?.onRosterChanged({ ...scope, runtime_id: "retired" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).not.toHaveBeenCalled();
+      page.visibilityState = "hidden";
+      page.dispatchEvent(new Event("visibilitychange"));
+      for (let i = 0; i < 10; i++) captured.current?.onRosterChanged(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).not.toHaveBeenCalled();
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "owner_reception_page",
+        "owner_reception_ack",
+      ]);
+      invoke.mockClear();
+      page.visibilityState = "visible";
+      captured.current?.onRosterChanged(scope);
       await vi.advanceTimersByTimeAsync(0);
       expect(useChat.getState().peers).toEqual([peer]);
       expect(
@@ -8000,7 +8232,12 @@ it.each(["held", "failed"])(
       ).toHaveLength(1);
       expect(
         invoke.mock.calls.filter(
-          ([cmd]) => cmd === "get_presence" || cmd === "list_peers",
+          ([cmd]) =>
+            cmd === "get_presence" ||
+            cmd === "list_peers" ||
+            cmd === "owner_node_identity" ||
+            cmd === "owner_reception_page" ||
+            cmd === "owner_reception_ack",
         ),
       ).toHaveLength(0);
       if (mode === "failed") rejectGroup(new Error("group storage failed"));
@@ -8009,10 +8246,20 @@ it.each(["held", "failed"])(
       if (mode === "failed")
         expect(usePresence.getState().unavailable).toBe(true);
       else expect(usePresence.getState().map.friend.online).toBe(true);
+      invoke.mockClear();
+      page.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls.map(([command]) => command)).toContain(
+        "get_presence",
+      );
+      expect(invoke.mock.calls.map(([command]) => command)).toContain(
+        "list_peers",
+      );
     } finally {
       stopPresence();
       stopChat();
       vi.useRealTimers();
+      vi.unstubAllGlobals();
     }
   },
 );
@@ -8043,7 +8290,10 @@ it.each(["identity", "peers"])(
       expect(useChat.getState().ready).toBe(phase !== "identity");
       expect(
         invoke.mock.calls.filter(([cmd]) => cmd === "owner_roster_observation"),
-      ).toHaveLength(phase === "identity" ? 0 : 1);
+      ).toHaveLength(1);
+      expect(
+        invoke.mock.calls.filter(([cmd]) => cmd === "owner_node_identity"),
+      ).toHaveLength(1);
     } finally {
       stop();
       vi.useRealTimers();

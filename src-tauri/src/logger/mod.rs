@@ -13,6 +13,7 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 /// Maximum number of days to retain log files
 const MAX_LOG_RETENTION_DAYS: u64 = 7;
 pub(crate) const GRAPHICS_LOG_TARGET: &str = "mesh_talk::graphics_configuration";
+pub(crate) const STARTUP_LOG_TARGET: &str = "mesh_talk::desktop_startup";
 
 // Opt-in metadata only. No background task or timer is created by this observer.
 const IPC_WORK_TARGET: &str = "mesh_talk::ipc_work";
@@ -21,7 +22,7 @@ const IPC_WORK_WINDOW: Duration = Duration::from_secs(5);
 static IPC_WORK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static IPC_WORK: std::sync::OnceLock<IpcWorkObserver> = std::sync::OnceLock::new();
 
-fn ipc_work_enabled() -> bool {
+pub(crate) fn work_trace_enabled() -> bool {
     *IPC_WORK_ENABLED.get_or_init(|| {
         std::env::var_os("MESH_TALK_TRACE_WORK").as_deref() == Some(std::ffi::OsStr::new("1"))
     })
@@ -39,7 +40,7 @@ fn ipc_command_name(enabled: bool, command: &str) -> Option<String> {
 
 /// Capture only a bounded name before Invoke is consumed. Disabled mode allocates nothing.
 pub(crate) fn capture_ipc_work_name(command: &str) -> Option<String> {
-    ipc_command_name(ipc_work_enabled(), command)
+    ipc_command_name(work_trace_enabled(), command)
 }
 
 struct IpcWorkState {
@@ -164,15 +165,17 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
         .targets(targets)
         .level(configured_log_level(cfg!(debug_assertions)))
         .level_for(GRAPHICS_LOG_TARGET, LogLevelFilter::Info)
+        .level_for(STARTUP_LOG_TARGET, LogLevelFilter::Info)
         .level_for(
             IPC_WORK_TARGET,
-            if ipc_work_enabled() {
+            if work_trace_enabled() {
                 LogLevelFilter::Info
             } else {
                 LogLevelFilter::Warn
             },
         )
         .level_for("mesh_talk_core::node::node", LogLevelFilter::Info)
+        .level_for("mesh_talk_core::runtime_startup", LogLevelFilter::Info)
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
 
@@ -245,10 +248,15 @@ pub fn get_log_file(app_handle: tauri::AppHandle) -> Result<String, crate::comma
 #[tauri::command]
 pub async fn read_log_tail(
     app_handle: tauri::AppHandle,
+    app: tauri::State<'_, crate::state::AppState>,
 ) -> Result<String, crate::commands::CommandError> {
-    tokio::task::spawn_blocking(move || read_log_tail_blocking(&app_handle))
+    let authority = crate::diagnostics::DiagnosticsAuthority::capture(&app)?;
+    let tail = tokio::task::spawn_blocking(move || read_log_tail_blocking(&app_handle))
         .await
-        .map_err(|e| crate::commands::CommandError::Internal(format!("log worker failed: {e}")))?
+        .map_err(|e| {
+            crate::commands::CommandError::Internal(format!("log worker failed: {e}"))
+        })??;
+    authority.checked(|| Ok(tail))
 }
 
 fn read_log_tail_blocking(
@@ -280,9 +288,12 @@ fn read_log_tail_blocking(
 pub async fn save_log_tail(
     app_handle: tauri::AppHandle,
     dest: String,
+    app: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), crate::commands::CommandError> {
+    let authority = crate::diagnostics::DiagnosticsAuthority::capture(&app)?;
     tokio::task::spawn_blocking(move || {
         let tail = read_log_tail_blocking(&app_handle)?;
+        authority.checked(|| Ok(()))?;
         fs::write(&dest, tail).map_err(|e| e.to_string())?;
         Ok(())
     })

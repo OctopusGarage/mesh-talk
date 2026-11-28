@@ -174,6 +174,7 @@ pub async fn channel_members(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
+    include_account_access: Option<bool>,
 ) -> Result<ChannelMembersInfo, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
     admission
@@ -280,7 +281,9 @@ pub async fn channel_members(
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
                 can_manage: reference.is_none() && node.channel_can_manage(channel)?,
-                account_access: Some(AccountGroupAccessInfo::read(&node, channel)),
+                account_access: include_account_access
+                    .unwrap_or(true)
+                    .then(|| AccountGroupAccessInfo::read(&node, channel)),
                 members,
             })
         })
@@ -385,26 +388,63 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
         .iter()
         .map(|id| parse_event_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    let app = app.state::<AppState>();
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let lock = app.app_lock();
+    let (node, work, lock_revision) = admission
+        .with_runtime(|runtime| {
+            let revision = lock.authorization_revision()?;
+            lock.with_unchanged_revision(revision, || {
+                Ok((runtime.handle(), runtime.blocking_work(), revision))
+            })
+        })
+        .await?;
+
+    // Preserve the existing serialized custody workload without occupying the
+    // session mutex or runtime slot through SQLite and certificate checks.
+    static CUSTODY_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let capacity = tokio::time::timeout(std::time::Duration::from_secs(5), CUSTODY_READS.acquire())
+        .await
+        .map_err(|_| CommandError::Internal("custody observation timed out".into()))?
+        .map_err(|_| CommandError::not_started())?;
+    #[cfg(test)]
+    let observation_hook = app.custody_observation_hook.lock().unwrap().take();
+    let observed_node = node.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    if !work.spawn(&mut tasks, move || {
+        let _capacity = capacity;
+        #[cfg(test)]
+        if let Some(hook) = observation_hook {
+            hook();
+        }
+
+        let batch = observed_node.channel_custody_counts(channel, &ids)?;
+        Ok::<_, CommandError>(
+            ids.into_iter()
+                .zip(batch)
+                .filter_map(|(id, (replicas, post_offices))| {
+                    Some(ChannelCustodyInfo {
+                        id: id.to_hex(),
+                        replicas: replicas?,
+                        post_offices: post_offices?,
+                    })
+                })
+                .collect(),
+        )
+    }) {
+        return Err(CommandError::not_started());
+    }
+    let observed = tasks
+        .join_next()
+        .await
+        .ok_or_else(CommandError::not_started)?
+        .map_err(|error| CommandError::Internal(error.to_string()))?;
     admission
-        .with_runtime(move |runtime| {
-            let node = runtime.handle();
-            let mut counts = Vec::new();
-            let batch = node.channel_custody_counts(channel, &ids)?;
-            for (id, (replicas, post_offices)) in ids.into_iter().zip(batch) {
-                let Some(replicas) = replicas else {
-                    continue;
-                };
-                let Some(post_offices) = post_offices else {
-                    continue;
-                };
-                counts.push(ChannelCustodyInfo {
-                    id: id.to_hex(),
-                    replicas,
-                    post_offices,
-                });
+        .with_runtime(|runtime| {
+            if !std::sync::Arc::ptr_eq(&node, &runtime.handle()) {
+                return Err(CommandError::not_started());
             }
-            Ok(counts)
+            lock.with_unchanged_revision(lock_revision, || observed)
         })
         .await
 }
@@ -658,28 +698,35 @@ pub async fn send_channel_message(
     reply_to: Option<String>,
     expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let id = parse_channel_id(&channel_id)?;
-                let reply = match reply_to {
-                    Some(h) => Some(parse_event_id(&h)?),
-                    None => None,
-                };
-                let node = runtime.handle();
-                node.send_channel_message_reply_expiring_if(
-                    id,
-                    text.as_bytes(),
-                    reply,
-                    expires_at_ms,
-                    |commit| admission.authorize_accept(runtime, commit),
-                )
-                .await
-                .map_err(CommandError::from)
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&app, &state)?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let id = parse_channel_id(&channel_id)?;
+                    let reply = match reply_to {
+                        Some(h) => Some(parse_event_id(&h)?),
+                        None => None,
+                    };
+                    let node = runtime.handle();
+                    node.send_channel_message_reply_expiring_if(
+                        id,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .await
+                    .map_err(CommandError::from)
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 /// Map the UI's "sent via the media button?" flag to a manifest file kind, so the receiver
@@ -774,4 +821,28 @@ mod inventory_display_tests {
             vec![&owner, &member, &relay]
         );
     }
+}
+
+/// Explicit source-scoped recent/older history; never starts a full archive drain.
+#[tauri::command]
+pub async fn fetch_channel_history_page(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    cursor: Option<String>,
+) -> Result<mesh_talk_core::node::RemoteHistoryPage, CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let page = runtime
+                    .handle()
+                    .fetch_channel_history_page(channel, cursor.as_deref())
+                    .await
+                    .map_err(CommandError::from)?;
+                admission.checked(runtime, || Ok(page))
+            })
+        })
+        .await
 }

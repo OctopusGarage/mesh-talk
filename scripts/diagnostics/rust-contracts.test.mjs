@@ -11,6 +11,7 @@ import { loadRequirements } from "../validation/pr-scenarios.mjs";
 const rootUrl = new URL("../../", import.meta.url);
 const root = fileURLToPath(rootUrl);
 const packages = new Map([
+  ["mesh-talk-protocol", "crates/mesh-talk-protocol"],
   ["mesh-talk-core", "crates/mesh-talk-core"],
   ["mesh-talk", "src-tauri"],
   ["mesh-talk-integrations", "crates/mesh-talk-integrations"],

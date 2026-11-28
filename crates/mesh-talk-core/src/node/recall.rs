@@ -419,7 +419,9 @@ impl Node {
             .lock()
             .expect("recalls mutex not poisoned")
             .record(conv, target, wall_clock)
-            .map_err(NodeError::Log)
+            .map_err(NodeError::Log)?;
+        self.note_ui_change();
+        Ok(())
     }
 
     /// Selected-row visibility. The caller supplies the author from its already

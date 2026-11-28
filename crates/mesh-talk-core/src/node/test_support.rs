@@ -242,3 +242,62 @@ impl Drop for IndependentPeerRuntime {
         }
     }
 }
+
+/// Complete existing routed group fanout before an offline cut or local assertion.
+/// Expected peers must already be named members; this never seeds a future
+/// sibling or adds a route, and never starts generic source recovery.
+pub(super) async fn complete_group_fanout(
+    source: &Arc<Node>,
+    group: crate::eventlog::ConversationId,
+    expected: &[&Arc<Node>],
+) {
+    assert!(expected.iter().all(|peer| {
+        source
+            .channel_members(group)
+            .contains(&peer.identity.public())
+    }));
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            source.prepare_account_group_fanout(group).await.unwrap();
+            let progress = source
+                .distribute_channel_confirming(group, &source.channel_members(group), None)
+                .await;
+            let mut known = true;
+            for peer in expected {
+                if peer.log.lock().unwrap().conversation_len(&group).unwrap() == 0 {
+                    known = false;
+                    continue;
+                }
+                peer.await_channel_metadata(group).await.unwrap();
+                known &= peer
+                    .account_group_projection(group)
+                    .unwrap()
+                    .state
+                    .is_some();
+            }
+            if known && progress == crate::node::channels::FanoutProgress::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("the exact group fanout must finish over existing permitted routes");
+}
+
+/// Metadata-only diagnostics for the real local protocol regression fixtures.
+pub(super) fn trace_sync_failures(node: &Arc<Node>, label: &'static str) {
+    let start = std::time::Instant::now();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase.starts_with("history_")
+            || phase.starts_with("delivery_range_")
+            || phase.starts_with("receipt_collect_")
+            || phase.starts_with("control_fanout_round_")
+        {
+            eprintln!(
+                "sync_diag {label} ms={} {phase}",
+                start.elapsed().as_millis()
+            );
+        }
+    }));
+}

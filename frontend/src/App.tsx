@@ -1,3 +1,4 @@
+import { startNativeWindowVisibility } from "@/lib/nativeWindowVisibility";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Loader2, LockKeyhole } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -64,6 +65,8 @@ export default function App() {
     packScope.account === accountId &&
     packScope.session === `${generation}:${runtimeRun}`,
   );
+
+  useEffect(startNativeWindowVisibility, []);
 
   useEffect(() => {
     if (presentationAcknowledged.current || booting || loggingOut) return;

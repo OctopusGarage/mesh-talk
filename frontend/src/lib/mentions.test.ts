@@ -99,3 +99,18 @@ it("matches Chinese and spaced display names without matching longer names or em
   expect(mentionsName("@alice_2", "alice")).toBe(false);
   expect(mentionsName("mail@alice.com", "alice")).toBe(false);
 });
+
+it("uses Unicode case folding and numeric mention boundaries", () => {
+  expect(mentionsName("@ſ", "s")).toBe(true);
+  expect(mentionsName("@alice²", "alice")).toBe(false);
+});
+
+it("does not treat code literals as channel mentions", () => {
+  expect(mentionsName("```python\n@alice\n```", "alice")).toBe(false);
+  expect(mentionsName("hello @alice", "alice")).toBe(true);
+});
+
+it("keeps code URLs literal for shared renderers and history link classification", () => {
+  const text = "```bash\nhttps://example.com @alice\n```";
+  expect(messageSegments(text)).toEqual([{ text, kind: "plain" }]);
+});

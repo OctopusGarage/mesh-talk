@@ -890,7 +890,11 @@ async fn direct_file_approval_shares_signed_revision_with_relay_delivery() {
         .await
         .unwrap();
     a.flush_delivery(card).await;
-    assert_eq!(offers.try_recv().unwrap().file_conv, file);
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(3), offers.recv())
+        .await
+        .expect("the real receiver must project the admitted signed file offer")
+        .expect("the receiver offer stream remains open");
+    assert_eq!(offer.file_conv, file);
     a.flush_file_delivery(card).await;
     b.decide_attachment(file, true).unwrap();
     a.file_consent

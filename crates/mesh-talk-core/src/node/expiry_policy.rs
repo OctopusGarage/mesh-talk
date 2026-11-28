@@ -30,17 +30,20 @@ impl ReceivedExpirySchedule {
 
     fn retain(&mut self, deadline: u64, sent: u64, first_seen: std::time::Instant) {
         self.wall = Some(self.wall.map_or(deadline, |prior| prior.min(deadline)));
-        let lifetime = deadline.saturating_sub(sent).min(30 * 24 * 60 * 60 * 1000);
-        let at = first_seen + std::time::Duration::from_millis(lifetime);
+        let at = first_seen + recipient_lifetime(deadline, sent);
         self.monotonic = Some(self.monotonic.map_or(at, |prior| prior.min(at)));
     }
 }
 
+pub(in crate::node) fn recipient_lifetime(deadline: u64, sent: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(deadline.saturating_sub(sent).min(30 * 24 * 60 * 60 * 1000))
+}
+
 /// Deadline authenticated inside either an account envelope or direct plaintext.
 pub(in crate::node) fn plaintext_deadline(wire: &[u8]) -> Option<u64> {
-    DmEnvelope::decode(wire).map_or_else(
+    DmEnvelope::decode_ref(wire).map_or_else(
         || crate::expiry::deadline(wire),
-        |envelope| crate::expiry::deadline(&envelope.body),
+        |envelope| crate::expiry::deadline(envelope.body),
     )
 }
 
@@ -82,9 +85,6 @@ impl Node {
         if deadline <= self.expiry_now() {
             return true;
         }
-        let lifetime = deadline
-            .saturating_sub(sent_at_ms)
-            .min(30 * 24 * 60 * 60 * 1000);
         let mut seen = self
             .expiry_first_seen
             .lock()
@@ -92,7 +92,7 @@ impl Node {
         seen.entry(id)
             .or_insert_with(std::time::Instant::now)
             .elapsed()
-            >= std::time::Duration::from_millis(lifetime)
+            >= recipient_lifetime(deadline, sent_at_ms)
     }
     pub(in crate::node) fn expired_received_file(
         &self,
@@ -124,24 +124,31 @@ impl Node {
         }
     }
     /// The process anchor prevents setting the wall clock backward from extending a deadline.
-    pub(in crate::node) fn expiry_now(&self) -> u64 {
+    /// Absolute time used by retained message expiry, with a monotonic floor.
+    pub fn expiry_now(&self) -> u64 {
         let (start, wall) = self.expiry_clock_start;
         super::node::now_millis().max(wall.saturating_add(start.elapsed().as_millis() as u64))
     }
 
     pub(in crate::node) fn prune_expired_received(&self) -> Result<usize, NodeError> {
-        let removed = self.prune_received_deadlines(false)?;
-        self.prune_favorite_files()?;
-        Ok(removed)
+        self.clean_expiry().map(|(removed, _)| removed)
+    }
+
+    /// A successful cleanup reports whether any obligation still needs clock checks.
+    pub(in crate::node) fn clean_expiry(&self) -> Result<(usize, bool), NodeError> {
+        let (removed, message_deadlines) = self.prune_received_deadlines(false)?;
+        let favorite_deadlines = self.prune_favorite_files()?;
+        Ok((removed, message_deadlines || favorite_deadlines))
     }
 
     // After restart the previous monotonic anchor is gone. Fail closed for recipient
     // copies with deadlines: erasing early is preferable to extending their lifetime.
     pub(in crate::node) fn prune_expired_received_on_open(&self) -> Result<usize, NodeError> {
         self.prune_received_deadlines(true)
+            .map(|(removed, _)| removed)
     }
 
-    fn prune_received_deadlines(&self, restart: bool) -> Result<usize, NodeError> {
+    fn prune_received_deadlines(&self, restart: bool) -> Result<(usize, bool), NodeError> {
         let own_account = self.account_id();
         let own_devices: std::collections::HashSet<_> = self
             .linked_devices()
@@ -256,37 +263,21 @@ impl Node {
             }
         }
         let mut targets = Vec::new();
+        let mut pending_deadlines = false;
         {
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             for transaction in delivery.pending_transactions() {
-                match transaction.body() {
-                    super::delivery_store::DeliveryTransaction::Outgoing {
-                        message, sent, ..
-                    } if plaintext_deadline(&sent.plaintext)
-                        .is_some_and(|deadline| deadline <= self.expiry_now()) =>
-                    {
+                if let Some((message, deadline, account)) = transaction.outgoing_expiry() {
+                    if deadline <= self.expiry_now() {
                         targets.push((
                             message.conversation,
                             message.logical_id,
-                            DmEnvelope::decode(&sent.plaintext).is_some(),
+                            account,
                             message.logical_id,
                         ));
+                    } else {
+                        pending_deadlines = true;
                     }
-                    super::delivery_store::DeliveryTransaction::OutgoingManifest {
-                        message,
-                        received,
-                        ..
-                    } if plaintext_deadline(&received.plaintext)
-                        .is_some_and(|deadline| deadline <= self.expiry_now()) =>
-                    {
-                        targets.push((
-                            message.conversation,
-                            message.logical_id,
-                            true,
-                            message.logical_id,
-                        ));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -302,17 +293,25 @@ impl Node {
         if removed > 0 {
             self.note_account_history_change();
         }
+        let mut received_schedule = self
+            .received_expiry_schedule
+            .lock()
+            .expect("expiry schedule mutex");
         if scan {
             // Stamp the inputs read BEFORE scanning. Concurrent appends or
             // authority changes then force another pass rather than being
             // certified by work that may not have visited them. Errors above
             // retain the previous schedule and remain retryable.
-            *self
-                .received_expiry_schedule
-                .lock()
-                .expect("expiry schedule mutex") = Some(schedule);
+            *received_schedule = Some(schedule);
         }
-        Ok(removed)
+        let received_deadlines = received_schedule
+            .as_ref()
+            .is_none_or(|entry| entry.wall.is_some());
+        drop(received_schedule);
+        let has_deadlines = received_deadlines
+            || pending_deadlines
+            || self.sentlog.lock().expect("sent mutex").has_deadlines()?;
+        Ok((removed, has_deadlines))
     }
 }
 

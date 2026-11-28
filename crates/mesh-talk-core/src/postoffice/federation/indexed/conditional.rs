@@ -135,7 +135,7 @@ pub(super) fn decode_flag(bytes: &[u8], prefix: &[u8]) -> Result<bool, IndexedRe
         _ => Err("invalid conditional completion frame".into()),
     }
 }
-async fn receive_supported<IO: AsyncRead + AsyncWrite + Unpin>(
+async fn receive_supported<IO: AsyncRead + AsyncWrite + Unpin + Send>(
     channel: &mut SecureChannel<IO>,
 ) -> Result<(), IndexedRelayError> {
     let bytes = channel.recv().await.map_err(|error| {
@@ -152,7 +152,7 @@ async fn receive_supported<IO: AsyncRead + AsyncWrite + Unpin>(
     }
     Ok(())
 }
-async fn receive_offer<IO: AsyncRead + AsyncWrite + Unpin>(
+async fn receive_offer<IO: AsyncRead + AsyncWrite + Unpin + Send>(
     channel: &mut SecureChannel<IO>,
 ) -> Result<Option<Stamp>, IndexedRelayError> {
     decode_offer(&channel.recv().await?)
@@ -249,7 +249,7 @@ impl IndexedRelayEndpoint {
             }
         }
     }
-    pub(super) async fn serve_conditional<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub(super) async fn serve_conditional<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         started: Instant,
@@ -285,7 +285,7 @@ impl IndexedRelayEndpoint {
                 .await
         }
     }
-    async fn fast_presence<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn fast_presence<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         proof: &ProofContext,
@@ -313,7 +313,7 @@ impl IndexedRelayEndpoint {
         }
         Ok(())
     }
-    pub(super) async fn finish_conditional_client<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub(super) async fn finish_conditional_client<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         proof: &ProofContext,
@@ -327,7 +327,7 @@ impl IndexedRelayEndpoint {
         }
         Ok(())
     }
-    pub(super) async fn finish_conditional_server<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub(super) async fn finish_conditional_server<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         proof: &ProofContext,

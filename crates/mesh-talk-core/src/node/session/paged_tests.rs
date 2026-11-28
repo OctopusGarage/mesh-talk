@@ -449,10 +449,10 @@ async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries:
         }
         // An ordinary query remains valid even when the optional digest probe
         // was skipped or differed. Exercise its actual paged network path.
-        let mut progress = SyncProgress {
+        let mut progress = SyncProgress(legacy_round::SyncProgress {
             started: true,
             ..Default::default()
-        };
+        });
         while !progress
             .step_burst_paged(channel.as_mut().unwrap(), &store, conversation, 1)
             .await
@@ -462,7 +462,7 @@ async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries:
         for _ in 0..2 {
             completions.recv().await.unwrap();
         }
-        assert_eq!(progress.total.applied, 0);
+        assert_eq!(progress.0.total.applied, 0);
         assert_eq!(
             progress.remote_have_count(),
             Some(if round < 6 { 32 } else { 33 })
@@ -986,6 +986,7 @@ enum Fault {
 /// through a long known prefix; this store cannot accidentally use SDK fallback.
 struct TinyPagedStore {
     repo: EventRepository,
+    retained_view: Option<<EventRepository as NetworkSyncStore>::View>,
     fault: Fault,
     have_calls: AtomicUsize,
     export_calls: AtomicUsize,
@@ -998,6 +999,7 @@ impl TinyPagedStore {
     fn new(repo: EventRepository) -> Self {
         Self {
             repo,
+            retained_view: None,
             fault: Fault::None,
             have_calls: AtomicUsize::new(0),
             export_calls: AtomicUsize::new(0),
@@ -1045,6 +1047,20 @@ impl NetworkSyncStore for TinyPagedStore {
     type ExportCursor = <EventRepository as NetworkSyncStore>::ExportCursor;
     fn open_view(&self, c: &ConversationId) -> Result<Self::View, LogError> {
         self.repo.open_view(c)
+    }
+    fn take_custody_view(&mut self, _: &ConversationId) -> Result<Option<Self::View>, LogError> {
+        Ok(self.retained_view.take())
+    }
+    fn durable_have_in_view(
+        &self,
+        _: &Self::View,
+        c: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        if self.preparation_rows.load(Ordering::Relaxed) != 0 {
+            return Err(LogError::StaleCursor);
+        }
+        NetworkSyncStore::durable_have(self, c, id)
     }
     fn prepare_view_step(
         &self,
@@ -1509,12 +1525,19 @@ async fn paged_export_uses_actual_frame_framing_and_rejects_one_byte_oversize() 
         let store = Mutex::new(store);
         let backend = PagedNetworkBackend(&store, None);
         let view = backend.open_view(&c).unwrap();
-        let result = select_export_frames(&backend, &view, c, &HashSet::new(), 1).await;
+        let result = select_export_batches(
+            &backend,
+            &view,
+            &HashSet::new(),
+            1,
+            legacy_round::event_frame_budget(c).unwrap(),
+        )
+        .await;
         if excess == 0 {
             let frame = result.unwrap().pop().unwrap();
             let bytes = encode(&SyncWire::Response(SyncResponse {
                 conversation: c,
-                events: frame.events,
+                events: frame,
                 have: vec![],
             }))
             .unwrap();
@@ -1585,15 +1608,25 @@ async fn paged_file_burst_fills_four_bounded_frames_across_tiny_scan_pages() {
     let store = Mutex::new(store);
     let backend = PagedNetworkBackend(&store, None);
     let view = backend.open_view(&c).unwrap();
-    let frames = select_export_frames(&backend, &view, c, &HashSet::new(), FILE_FOLLOWUP_BURST)
-        .await
-        .unwrap();
+    let frames = select_export_batches(
+        &backend,
+        &view,
+        &HashSet::new(),
+        FILE_FOLLOWUP_BURST,
+        legacy_round::event_frame_budget(c).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(frames.len(), 4);
     let mut oracle = EventLog::default();
-    for frame in frames {
-        assert_eq!(frame.events.len(), 1);
-        assert!(encode(&SyncWire::Followup(frame.clone())).unwrap().len() <= MAX_PLAINTEXT);
-        for event in frame.events {
+    for events in frames {
+        assert_eq!(events.len(), 1);
+        let frame = SyncFollowup {
+            conversation: c,
+            events: events.clone(),
+        };
+        assert!(encode(&SyncWire::Followup(frame)).unwrap().len() <= MAX_PLAINTEXT);
+        for event in events {
             oracle.append(event).unwrap();
         }
     }
@@ -2704,7 +2737,7 @@ async fn requester_have_selection_reuse_loopback() {
         let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public()))
             .await.unwrap();
         // A continuing production round has already completed capability probing.
-        let mut progress = SyncProgress { started: true, ..Default::default() };
+        let mut progress = SyncProgress(legacy_round::SyncProgress { started: true, ..Default::default() });
         let store = node.sync_store(&proof.public());
         let client = progress.step_burst_paged(&mut channel, &store, conversation, 1);
         let mut appended = None;
@@ -2734,7 +2767,7 @@ async fn requester_have_selection_reuse_loopback() {
                 assert!(exported.contains(&id), "fresh cutoff omitted concurrent append");
                 assert_eq!(counts(), (2, 3));
             } else if mutation == "received" {
-                assert_eq!(progress.total.applied, 1, "peer event was not durably applied");
+                assert_eq!(progress.0.total.applied, 1, "peer event was not durably applied");
                 assert_eq!(counts(), (2, 3), "received causal event must select a new cutoff");
                 assert!(!exported.contains(&received_id), "remote Have was ignored");
             } else {
@@ -2808,8 +2841,8 @@ async fn requester_no_progress_reuses_only_local_preparation_loopback() {
             });
             let stream = tokio::net::TcpStream::connect(address).await.unwrap();
             let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public())).await.unwrap();
-            let mut progress = SyncProgress { started: true,
-                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() };
+            let mut progress = SyncProgress(legacy_round::SyncProgress { started: true,
+                rounds: if max_round { MAX_SYNC_ROUNDS - 1 } else { 0 }, ..Default::default() });
             if !max_round {
                 assert!(!progress.step_burst_paged(&mut channel, &store, conversation, 1).await.unwrap());
             }
@@ -2990,8 +3023,8 @@ async fn guarded_default_fingerprint_quiet_path_survives_unrelated_source_append
             {}
             let metadata =
                 NetworkSyncStore::probe_metadata(&*store.lock().unwrap(), &conversation)?;
-            let applied = progress.total.applied;
-            let rounds = progress.rounds;
+            let applied = progress.0.total.applied;
+            let rounds = progress.0.rounds;
             drop(store);
             drop(channel);
             let (fingerprints, requests, remote_metadata) = received
@@ -3311,8 +3344,8 @@ async fn guarded_pull_subset_fixture(change: &'static str) {
             };
             let hint = NetworkSyncStore::quiet_comparison(&*store.lock().unwrap(), &conversation)?
                 .is_some();
-            let applied = progress.total.applied;
-            let pushed = progress.pushed_total;
+            let applied = progress.0.total.applied;
+            let pushed = progress.0.pushed_total;
             let intersection = progress.remote_have_count();
             drop(store);
             drop(channel);
@@ -3572,7 +3605,7 @@ async fn channel_exact_custody_after_no_progress_fixture(held: bool) {
         let fresh_probe = task.await.unwrap();
         assert!(fresh_probe, "NoProgress must not suppress independent exact custody evidence");
         assert_eq!(source.channel_custody_count(conversation, target).unwrap(), Some(usize::from(held)));
-        assert!(deferred, "exact custody does not finish the unrelated control fanout");
+        assert_eq!(deferred, super::super::channels::FanoutProgress::Deferred, "exact custody does not finish the unrelated control fanout");
     }).await.expect("exact custody regression timed out");
 }
 
@@ -3601,6 +3634,12 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
             assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
                 SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
                 | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
+            // An old peer treats the domain-separated capability marker as an
+            // ordinary mismatching fingerprint, then receives the real probe.
+            connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap()).await.unwrap();
+            assert!(matches!(decode(&connection.recv().await.unwrap()).unwrap(),
+                SyncWire::FpRequest(_) | SyncWire::FpRequestV2(_) | SyncWire::FpRequestV3(_)
+                | SyncWire::FpRequestV4(_) | SyncWire::FpRequestV5(_)));
             // A complete matching ordinary round is independent of support for
             // the appended optional custody request on this disposable stream.
             connection.send(&encode(&SyncWire::FpResponse(FpResponse { matched: true })).unwrap()).await.unwrap();
@@ -3610,9 +3649,237 @@ async fn legacy_optional_custody_close_does_not_defer_completed_control_fanout()
         });
         let deferred = source.distribute_channel_confirming(conversation, &[proof.public()], Some(event)).await;
         server.await.unwrap();
-        assert!(!deferred, "an unsupported optional check cannot retire a successfully completed control round as unfinished");
+        assert_eq!(deferred, super::super::channels::FanoutProgress::Complete, "an unsupported optional check cannot retire a successfully completed control round as unfinished");
         assert_eq!(source.channel_custody_count(conversation, event).unwrap(), Some(0));
         assert!(source.channel_custody_observations(conversation, event).is_empty(),
             "a closed optional query must publish neither positive nor negative custody evidence");
     }).await.expect("legacy optional custody scenario timed out");
+}
+
+#[tokio::test]
+async fn paged_reconciliation_accepts_an_alternate_frame_session() {
+    struct MemorySession {
+        peer: crate::identity::device::PublicIdentity,
+        outgoing: tokio::sync::mpsc::Sender<Vec<u8>>,
+        incoming: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl SdkSession for MemorySession {
+        type Peer = ReconciliationPeer;
+        type Error = SessionError;
+
+        fn peer_identity(&self) -> &crate::identity::device::PublicIdentity {
+            &self.peer
+        }
+
+        async fn send(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+            self.outgoing.send(frame.to_vec()).await.unwrap();
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Vec<u8>, SessionError> {
+            Ok(self.incoming.recv().await.unwrap())
+        }
+    }
+
+    let (_directory, store, signer, conversation) = tiny_fixture();
+    let event = Event::new(
+        &signer,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Message,
+        vec![],
+    );
+    let recipient = DeviceIdentity::generate();
+    let mut source = EventLog::default();
+    source.append(event.clone()).unwrap();
+    let (to_server, from_client) = tokio::sync::mpsc::channel(4);
+    let (to_client, from_server) = tokio::sync::mpsc::channel(4);
+    let mut client = MemorySession {
+        peer: signer.public(),
+        outgoing: to_server,
+        incoming: from_server,
+    };
+    let mut server = MemorySession {
+        peer: recipient.public(),
+        outgoing: to_client,
+        incoming: from_client,
+    };
+    let destination = Mutex::new(store);
+    let source = Mutex::new(source);
+    let (destination, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            async move {
+                let mut progress = SyncProgress::default();
+                while !progress
+                    .step_backend(
+                        &mut client,
+                        &PagedNetworkBackend(&destination, None),
+                        conversation,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                {}
+                destination
+            },
+            async {
+                let backend = LegacyCollectingNetworkAdapter(&source);
+                while let Some(frame) = server.incoming.recv().await {
+                    serve_wire_backend(&mut server, &backend, &frame)
+                        .await
+                        .unwrap();
+                }
+            },
+        )
+    })
+    .await
+    .expect("in-memory reconciliation timed out");
+    assert!(
+        destination
+            .lock()
+            .unwrap()
+            .repo
+            .get(&event.id)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cached_partial_view_finishes_preparation_before_use() {
+    let (_dir, mut store, _, scope) = tiny_fixture();
+    store.retained_view = Some(NetworkSyncStore::open_view(&store, &scope).unwrap());
+    store.preparation_rows.store(257, Ordering::Relaxed);
+    let store = Mutex::new(store);
+    let backend = PagedNetworkBackend(&store, None);
+    let _view = backend::open_prepared_view(&backend, &scope).await.unwrap();
+    let store = store.lock().unwrap();
+    assert_eq!(store.preparation_rows.load(Ordering::Relaxed), 0);
+    assert!(store.preparation_calls.load(Ordering::Relaxed) >= 2);
+}
+
+#[tokio::test]
+async fn cached_partial_view_answers_exact_custody_over_authenticated_channel() {
+    let (_dir, mut store, signer, scope) = tiny_fixture();
+    let event = Event::new(&signer, scope, 1, vec![], 1, 0, EventKind::Message, vec![1]);
+    let id = event.id;
+    store.repo.append(&event).unwrap();
+    store.retained_view = Some(NetworkSyncStore::open_view(&store, &scope).unwrap());
+    store.preparation_rows.store(257, Ordering::Relaxed);
+    let store = Arc::new(Mutex::new(store));
+    let peer = DeviceIdentity::generate();
+    let (a, b) = tokio::io::duplex(65536);
+    let (client, server) = tokio::join!(
+        SecureChannel::connect(a, &peer, None),
+        SecureChannel::accept(b, &signer)
+    );
+    let mut client = client.unwrap();
+    let mut server = server.unwrap();
+    let serving = store.clone();
+    let response = async move {
+        let bytes = server.recv().await.unwrap();
+        serve_wire_bytes_paged(&mut server, &serving, &bytes).await
+    };
+    let (held, served) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(request_durable_have(&mut client, scope, id), response)
+    })
+    .await
+    .expect("the owned exact-custody exchange must finish");
+    served.expect("partial cached preparation must not close the authenticated channel");
+    assert!(held.unwrap());
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .preparation_rows
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[tokio::test]
+async fn independent_custody_refreshes_retained_range_cut_after_incoming_append() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = crate::node::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let scope =
+        crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    let first = Event::new(&peer, scope, 1, vec![], 1, 0, EventKind::Message, vec![7]);
+    node.log
+        .lock()
+        .unwrap()
+        .append_durable(first.clone())
+        .unwrap();
+    let owner = node.serve_sync_store(&peer.public());
+    let adapter = PagedNetworkBackend(&owner, None);
+    // Warm the ordinary metadata index before capturing the actual range cut.
+    drop(backend::open_prepared_view(&adapter, &scope).await.unwrap());
+    let view = owner.lock().unwrap().open_view(&scope).unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .prepare_range_selection_for_test(&view)
+        .unwrap();
+    let before = owner.lock().unwrap().metadata(&view).unwrap().count;
+    assert_eq!(before, 1);
+    let continuation = owner.lock().unwrap().open_view(&scope).unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .prepare_range_selection_for_test(&continuation)
+        .unwrap();
+    assert!(
+        owner
+            .lock()
+            .unwrap()
+            .retain_custody_view(view)
+            .unwrap()
+            .is_none()
+    );
+    let second = Event::new(
+        &peer,
+        scope,
+        2,
+        vec![first.id],
+        2,
+        0,
+        EventKind::Message,
+        vec![8],
+    );
+    assert!(matches!(
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(
+            &mut *owner.lock().unwrap(),
+            second.clone()
+        )
+        .unwrap(),
+        crate::eventlog::AppendOutcome::Appended
+    ));
+    // A live range continuation keeps its valid finite prefix across append.
+    owner.lock().unwrap().validate_view(&continuation).unwrap();
+    assert_eq!(
+        owner.lock().unwrap().metadata(&continuation).unwrap().count,
+        before
+    );
+    // The retained range-owned custody slot still carries that old prefix.
+    // Independent legacy checkout must refresh it rather than reuse the cut.
+    let refreshed = backend::open_prepared_view(&adapter, &scope).await.unwrap();
+    assert_eq!(owner.lock().unwrap().metadata(&refreshed).unwrap().count, 2);
+    assert!(
+        owner
+            .lock()
+            .unwrap()
+            .durable_have_in_view(&refreshed, &scope, &second.id)
+            .unwrap()
+    );
 }

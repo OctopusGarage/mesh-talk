@@ -372,8 +372,25 @@ impl Node {
         };
         let mut committed = false;
         for (card, final_chunk) in eligible {
+            let first_receive_completion = crate::transport::diagnostics::observing_messages()
+                && card.completion_binding.is_some()
+                && !store.has_completed_transfer(conversation, final_chunk);
             if store.complete_file(card.id, final_chunk).is_err() {
                 return Ok(false);
+            }
+            if first_receive_completion
+                && let Ok(Some(manifest)) = self
+                    .files
+                    .lock()
+                    .expect("files lock not poisoned")
+                    .manifest(conversation)
+            {
+                crate::transport::diagnostics::record_message(|metrics| {
+                    metrics.attachments_verified = metrics.attachments_verified.saturating_add(1);
+                    metrics.verified_attachment_bytes = metrics
+                        .verified_attachment_bytes
+                        .saturating_add(manifest.size());
+                });
             }
             committed = true;
         }

@@ -11,24 +11,31 @@ pub async fn send_dm(
     text: String,
     reply_to: Option<String>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                // Snapshot the node handle, then release the state lock before the .await send.
-                let node = runtime.handle();
-                let reply = match reply_to {
-                    Some(h) => Some(parse_event_id(&h)?),
-                    None => None,
-                };
-                node.send_dm_reply_if(&recipient, text.as_bytes(), reply, |commit| {
-                    admission.authorize_accept(runtime, commit)
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&app, &state)?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    // Snapshot the node handle, then release the state lock before the .await send.
+                    let node = runtime.handle();
+                    let reply = match reply_to {
+                        Some(h) => Some(parse_event_id(&h)?),
+                        None => None,
+                    };
+                    node.send_dm_reply_if(&recipient, text.as_bytes(), reply, |commit| {
+                        admission.authorize_accept(runtime, commit)
+                    })
+                    .await
+                    .map_err(CommandError::from)
                 })
-                .await
-                .map_err(CommandError::from)
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 /// Send an opaque WebRTC call signal (SDP offer/answer / "bye") to a specific device
@@ -52,6 +59,36 @@ pub async fn send_call_signal(
                 .await
                 .map_err(CommandError::from)
             })
+        })
+        .await
+}
+
+/// Read the exact group's current signed membership for a meeting device.
+#[tauri::command]
+pub async fn group_voice_member(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+    group_id: String,
+    device_id: String,
+) -> Result<Option<String>, CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    if group_id.len() != 64 || device_id.len() != 32 {
+        return Ok(None);
+    }
+    let group = parse_channel_id(&group_id)?;
+    admission
+        .with_runtime(|runtime| {
+            if !settings
+                .get_for_owner(admission.lease().owner())?
+                .calls_enabled
+            {
+                return Ok(None);
+            }
+            runtime
+                .handle()
+                .group_voice_member(group, &device_id)
+                .map_err(CommandError::from)
         })
         .await
 }
@@ -88,23 +125,30 @@ pub async fn send_to_account(
     text: String,
     reply_to: Option<String>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
-    let reply = reply_to.as_deref().map(parse_event_id).transpose()?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let node = runtime.handle();
-                let id = node
-                    .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
-                        admission.authorize_accept(runtime, accept)
-                    })
-                    .await
-                    .map_err(CommandError::from)?;
-                node.flush_delivery(id).await;
-                Ok(())
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&app, &state)?;
+        let reply = reply_to.as_deref().map(parse_event_id).transpose()?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let node = runtime.handle();
+                    let id = node
+                        .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
+                            admission.authorize_accept(runtime, accept)
+                        })
+                        .await
+                        .map_err(CommandError::from)?;
+                    node.flush_delivery(id).await;
+                    Ok(())
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 /// Send an animated sticker as its own message. `convId` is the channel id (hex) when
@@ -120,40 +164,47 @@ pub async fn send_sticker(
     is_channel: bool,
     expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
-    let channel = is_channel.then(|| parse_channel_id(&conv_id)).transpose()?;
-    admission
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                let node = runtime.handle();
-                match channel {
-                    Some(channel) => node
-                        .send_sticker_channel_expiring_if(
-                            channel,
-                            &sticker_id,
-                            fallback.as_bytes(),
-                            expires_at_ms,
-                            |commit| admission.authorize_accept(runtime, commit),
-                        )
-                        .await
-                        .map_err(CommandError::from),
-                    None => {
-                        let id = node
-                            .enqueue_sticker_to_account_if(
-                                &conv_id,
+    let result = async {
+        let admission = RuntimeAdmission::capture_current(&app, &state)?;
+        let channel = is_channel.then(|| parse_channel_id(&conv_id)).transpose()?;
+        admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    let node = runtime.handle();
+                    match channel {
+                        Some(channel) => node
+                            .send_sticker_channel_expiring_if(
+                                channel,
                                 &sticker_id,
                                 fallback.as_bytes(),
-                                |accept| admission.authorize_accept(runtime, accept),
+                                expires_at_ms,
+                                |commit| admission.authorize_accept(runtime, commit),
                             )
                             .await
-                            .map_err(CommandError::from)?;
-                        node.flush_delivery(id).await;
-                        Ok(())
+                            .map_err(CommandError::from),
+                        None => {
+                            let id = node
+                                .enqueue_sticker_to_account_if(
+                                    &conv_id,
+                                    &sticker_id,
+                                    fallback.as_bytes(),
+                                    |accept| admission.authorize_accept(runtime, accept),
+                                )
+                                .await
+                                .map_err(CommandError::from)?;
+                            node.flush_delivery(id).await;
+                            Ok(())
+                        }
                     }
-                }
+                })
             })
-        })
-        .await
+            .await
+    }
+    .await;
+    if result.is_err() {
+        mesh_talk_core::transport::diagnostics::note_send_request_error();
+    }
+    result
 }
 
 #[tauri::command]

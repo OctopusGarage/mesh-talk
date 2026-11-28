@@ -223,6 +223,15 @@ impl AuthService {
         name: String,
         password: String,
     ) -> AuthResult<(User, String, crate::desktop_session::SessionLease)> {
+        self.login_session_with_totp(name, password, None)
+    }
+
+    pub(crate) fn login_session_with_totp(
+        &self,
+        name: String,
+        password: String,
+        proof: Option<String>,
+    ) -> AuthResult<(User, String, crate::desktop_session::SessionLease)> {
         let normalized_name = name.trim();
         if normalized_name.is_empty() {
             return Err(AuthError::InvalidInput(
@@ -244,6 +253,31 @@ impl AuthService {
                 }
                 _ => AuthError::StorageError(format!("Failed to authenticate user: {}", e)),
             })?;
+
+        let policy = self
+            .identity_manager
+            .export_account_security(&resolved.user.username, &resolved.identity_password)
+            .map_err(|_| {
+                AuthError::StorageError("Unable to read account security policy".into())
+            })?;
+        if policy.totp.is_some() {
+            let proof = proof
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| AuthError::InvalidInput("TOTP_REQUIRED".into()))?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| AuthError::InternalError("System clock is invalid".into()))?
+                .as_secs();
+            self.identity_manager
+                .verify_account_totp(
+                    &resolved.user.username,
+                    &resolved.identity_password,
+                    proof,
+                    now,
+                )
+                .map_err(|_| AuthError::InvalidInput("TOTP_INVALID".into()))?;
+        }
 
         let identity_user = &resolved.user;
         let mut user = User {
@@ -592,6 +626,55 @@ mod tests {
             result,
             Err(AuthError::InvalidInput(ref msg)) if msg.contains("Address")
         ));
+    }
+
+    #[test]
+    fn enabled_totp_blocks_password_only_activation_and_consumes_recovery() {
+        use mesh_talk_core::identity::account_security::{AccountSecurity, TotpEnrollment};
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(IdentityManager::new(FileManager::new(
+            dir.path().to_owned(),
+        )));
+        manager.register_user("alice", "strong-password").unwrap();
+        let recovery = "fixture-recovery-code";
+        let hash: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(recovery.as_bytes()).into()
+        };
+        manager
+            .import_account_security(
+                "alice",
+                "strong-password",
+                0,
+                AccountSecurity {
+                    version: 1,
+                    generation: 1,
+                    totp: Some(TotpEnrollment {
+                        secret: [1; 20],
+                        recovery_hashes: vec![hash],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let auth = AuthService::new(manager);
+        assert!(
+            matches!(auth.login_session("alice".into(), "strong-password".into()),
+            Err(AuthError::InvalidInput(ref message)) if message == "TOTP_REQUIRED")
+        );
+        assert!(auth.session.capture().is_err());
+        assert!(
+            auth.login_session_with_totp(
+                "alice".into(),
+                "strong-password".into(),
+                Some(recovery.into())
+            )
+            .is_ok()
+        );
+        assert!(
+            matches!(auth.login_session_with_totp("alice".into(), "strong-password".into(), Some(recovery.into())),
+            Err(AuthError::InvalidInput(ref message)) if message == "TOTP_INVALID")
+        );
     }
 
     #[test]

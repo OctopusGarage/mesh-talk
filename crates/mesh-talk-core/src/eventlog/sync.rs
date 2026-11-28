@@ -17,13 +17,13 @@
 //! so even signed events with inverted clocks make progress across bounded frames.
 
 pub mod network;
+pub mod range;
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::eventlog::store::{AppendOutcome, EventLog};
 use bincode::Options;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use mesh_replication::InventoryDigest;
 use std::collections::{HashMap, HashSet};
 
 /// Bytes reserved per sync frame for the message's non-event framing (enum tag,
@@ -49,48 +49,9 @@ const _: () = assert!(
         < crate::transport::MAX_PLAINTEXT
 );
 
-/// Sent by the peer initiating sync: "for this conversation, here are the ids I have."
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncRequest {
-    pub conversation: ConversationId,
-    pub have: Vec<EventId>,
-}
-
-/// The responder's reply: the events the requester is missing (topological
-/// order), plus the responder's own id-set so the requester can reciprocate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncResponse {
-    pub conversation: ConversationId,
-    pub events: Vec<Event>,
-    /// The responder's OWN event ids (note: `SyncRequest::have` is the
-    /// requester's). The requester uses these to compute the events the
-    /// responder is missing, returned via [`SyncFollowup`].
-    pub have: Vec<EventId>,
-}
-
-/// The requester's final message: the events the responder is missing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncFollowup {
-    pub conversation: ConversationId,
-    pub events: Vec<Event>,
-}
-
-/// A whole-conversation fingerprint probe sent before the id-set exchange: "here is a
-/// digest of my ENTIRE event-id set for this conversation." If the responder's digest
-/// matches, the two logs are identical and the O(N) have-set streaming is skipped — the
-/// common case on an idle drain tick (nothing changed since last sync).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FpRequest {
-    pub conversation: ConversationId,
-    pub fingerprint: [u8; 32],
-}
-
-/// The responder's verdict on an [`FpRequest`]: `true` ⇒ our id-sets are identical, skip
-/// reconciliation; `false` ⇒ fall through to the full id-set exchange.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FpResponse {
-    pub matched: bool,
-}
+pub use mesh_talk_protocol::legacy_wire::{
+    FileConsentStatus, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse,
+};
 
 /// A collision-resistant digest of a conversation's entire event-id SET. Order-independent
 /// (ids are sorted first) so two peers holding the same set always compute the same value,
@@ -100,26 +61,14 @@ pub struct FpResponse {
 /// recovered on a later sync — and can NEVER inject or corrupt history.
 pub fn fingerprint(mut ids: Vec<EventId>) -> [u8; 32] {
     ids.sort_unstable();
-    let mut hasher = Sha256::new();
-    hasher.update((ids.len() as u64).to_le_bytes());
+    let mut hasher = InventoryDigest::new(ids.len() as u64);
     for id in &ids {
         hasher.update(id.as_bytes());
     }
-    hasher.finalize().into()
+    hasher.finish()
 }
 
-/// Outcome of ingesting a batch of received events.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ApplyReport {
-    /// Events newly appended.
-    pub applied: usize,
-    /// Events already present (content-addressed duplicates).
-    pub duplicates: usize,
-    /// Events rejected by validation, with a human-readable reason. (id, message)
-    /// Typed validation/admission errors are classified before formatting these
-    /// bounded diagnostics. Local store failures abort sync instead.
-    pub rejected: Vec<(EventId, String)>,
-}
+pub use mesh_talk_protocol::legacy_round::ApplyReport;
 
 /// Collecting compatibility operations for the in-process SDK. Network stores
 /// use the independent [`network::NetworkSyncStore`] seam.
@@ -266,13 +215,6 @@ pub trait SyncStore {
     }
     /// Validate and store a received event (the store's normal append gate).
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum FileConsentStatus {
-    Pending,
-    Accepted,
-    Declined,
 }
 
 // NOTE: this impl is structurally identical to `impl SyncStore for

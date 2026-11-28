@@ -21,6 +21,21 @@ fn emit_info(logger: &dyn log::Log, args: std::fmt::Arguments<'_>) {
     }
 }
 
+pub(super) fn startup_phase_clock(scope: &'static str) -> impl Fn(&'static str) + Copy {
+    let clock = (std::env::var_os("MESH_TALK_TRACE_WORK").as_deref()
+        == Some(std::ffi::OsStr::new("1")))
+    .then(Instant::now);
+    move |phase| {
+        if let Some(clock) = clock {
+            log::info!(
+                target: "mesh_talk_core::runtime_startup",
+                "runtime_startup phase={phase} elapsed_ms={} scope={scope}",
+                clock.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 const INTERVAL: Duration = Duration::from_secs(30);
 const ROWS: usize = 64;
 
@@ -697,7 +712,7 @@ mod tests {
         assert_eq!(
             node.distribute_channel_confirming(unknown, &[], None)
                 .now_or_never(),
-            Some(false)
+            Some(crate::node::channels::FanoutProgress::Deferred)
         );
         let sites = node
             .order_work_observation
@@ -737,13 +752,16 @@ mod tests {
                     && row.contains("work_observation.rs")),
             "static origins survive a busy supplemental repository"
         );
+        // Cancelling the first poll does not cancel its admitted blocking
+        // metadata turn. Its real owner must retire before exclusive mutation.
+        node.runtime_work.drain().await;
         std::sync::Arc::get_mut(&mut node)
             .unwrap()
             .order_work_observation = None;
         assert_eq!(
             node.distribute_channel_confirming(unknown, &[], None)
                 .now_or_never(),
-            Some(false)
+            Some(crate::node::channels::FanoutProgress::Deferred)
         );
         let capture = OwnerCapture(Mutex::new(Vec::new()));
         node.observe_order_work_with_logger(&capture);

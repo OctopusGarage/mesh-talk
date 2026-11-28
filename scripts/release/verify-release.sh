@@ -43,7 +43,7 @@ done
 # verifier below rejects unknown names and binds every standalone byte to the
 # checksum manifest inside its signed ZIP, without embedding duplicate payloads.
 shopt -s nullglob
-standalone_assets=("$asset_dir"/mesh-talk-update_* "$asset_dir"/mesh-talk-update-raw_* "$asset_dir"/mesh-talk-patch_*)
+standalone_assets=("$asset_dir"/mesh-talk-update_* "$asset_dir"/mesh-talk-update-raw_* "$asset_dir"/mesh-talk-patch_* "$asset_dir"/mesh-talk-installer_*)
 for asset in "${standalone_assets[@]}"; do
   test -f "$asset" && test ! -L "$asset" && test -s "$asset"
   gh attestation verify "$asset" --repo "$repository" \
@@ -53,4 +53,11 @@ for asset in "${standalone_assets[@]}"; do
 done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-python3 -B "$script_dir/verify_assets.py" "$asset_dir" --tag "$tag" --version "$version"
+verification_options=()
+if [[ "${7:-}" == --require-linux-downloads ]]; then
+  verification_options+=(--require-linux-downloads)
+elif [[ "$#" -gt 6 ]]; then
+  echo "Unexpected release verification option" >&2
+  exit 1
+fi
+python3 -B "$script_dir/verify_assets.py" "$asset_dir" --tag "$tag" --version "$version" ${verification_options[@]+"${verification_options[@]}"}

@@ -347,6 +347,7 @@ export async function receiptPhase(c, state, name, expected, historical = false,
   }
   const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
   for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
+  const phaseStarted = performance.now();
   let statuses, latestStatuses = null, observationError = null;
   let deliveryObservations = state.ids.slice(0, 3).map(() => ({ kind: "UNKNOWN", age_ms: null, reason: null }));
   try {
@@ -378,14 +379,17 @@ export async function receiptPhase(c, state, name, expected, historical = false,
     const diagnostic = JSON.stringify({ statuses: latestStatuses, deliveryObservations, observationError, endpointContext, endpointContextError });
     throw new Error(`${error.message}; receipt observation=${diagnostic}`, { cause: error });
   }
+  const backendObservedMs = Math.round(performance.now() - phaseStarted);
+  const iconObservedMs = [];
   const captures = [];
   for (const [index, label] of [...state.labels].reverse().entries()) {
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
+    iconObservedMs.push(Math.round(performance.now() - phaseStarted));
     captures.push(await c.captureReceiptCard(index === 2 ? name : `${name}-${index}`, { label, status: expected }));
   }
-  await c.passed(name, { captures, owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" }, captures);
+  await c.passed(name, { captures, owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, backendObservedMs, iconObservedMs, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" }, captures);
 }
 
 export async function receiptScenarios(c) {
@@ -558,6 +562,29 @@ export async function wrongPasswordCheckpoint(c) {
   await c.passed(name, { sessionReady, loggedOut: true, wrongPasswordRejected: true, signinRestored: true, invalidCredentialsKey: "login.invalidCredentials", errorCapture }, [errorCapture]);
 }
 
+export async function groupReceiptScenario(c) {
+  const { execute, observe, until, passed, fill, click, peer, userId } = c;
+  const groupName = `core-group-${c.nonce}`;
+  await writeChildCommand(peer, `/channel-new ${groupName} ${userId}\n`);
+  const group = await until("real CLI group distributed", async () => (await observe("list_channels")).find(g => g.name === groupName));
+  const groupText = `real-group-message-${c.nonce}`;
+  await writeChildCommand(peer, `/channel-msg ${group.channel_id} ${groupText}\n`);
+  await until("group message durable", async () => (await observe("channel_history", { channelId: group.channel_id, limit: 50 })).some(h => h.text === groupText));
+  await click(`conversation-row-${group.channel_id}`);
+  await revealLatestNativeMessage(c, groupText);
+  const outgoingGroupText = `group-copy-${c.nonce}`;
+  const groupSentAt = performance.now();
+  await fill("composer-input", outgoingGroupText);
+  await click("composer-send");
+  await until("real CLI receives desktop group message", () => peer.output.includes(outgoingGroupText));
+  const localGroup = await until("desktop stores original group event", async () => (await observe("channel_history", { channelId: group.channel_id, limit: 50 })).find(h => h.from_me && h.text === outgoingGroupText));
+  const copy = await until("exact member custody confirmed by native backend", async () => (await observe("channel_custody_statuses", { channelId: group.channel_id, ids: [localGroup.id] })).find(result => result.id === localGroup.id && result.replicas === 1 && result.post_offices === 0));
+  const custodyObservedAt = performance.now();
+  await revealLatestNativeMessage(c, outgoingGroupText);
+  await until("native group member-copy icon visible", () => execute("const bubble=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])), badge=bubble?.querySelector('[data-custody=\"1\"]');const r=badge?.getBoundingClientRect(),log=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!log&&r.width>0&&r.height>0&&r.top>=log.top&&r.bottom<=log.bottom&&badge.querySelector('[data-status-count]')?.textContent==='1'&&!bubble.querySelector('[data-delivery]');", [outgoingGroupText]));
+  await passed("group-message", { channelId: group.channel_id, rendered: true, persisted: true, outgoingCopy: { ...copy, backendObservedMs: Math.round(custodyObservedAt - groupSentAt), iconObservedMs: Math.round(performance.now() - groupSentAt) } });
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
     fixture, history, row, privacySettings, key, signOut, userName } = c;
@@ -615,15 +642,7 @@ export async function coreScenarios(c) {
     }
   }
   await passed("message-content", { unicodeRendered: true, multilineRendered: true, longRendered: true, persistedCount: contents.length, multilineLayout });
-  const groupName = `core-group-${c.nonce}`;
-  await writeChildCommand(peer, `/channel-new ${groupName} ${userId}\n`);
-  const group = await until("real CLI group distributed", async () => (await observe("list_channels")).find(g => g.name === groupName));
-  const groupText = `real-group-message-${c.nonce}`;
-  await writeChildCommand(peer, `/channel-msg ${group.channel_id} ${groupText}\n`);
-  await until("group message durable", async () => (await observe("channel_history", { channelId: group.channel_id, limit: 50 })).some(h => h.text === groupText));
-  await click(`conversation-row-${group.channel_id}`);
-  await rendered(groupText);
-  await passed("group-message", { channelId: group.channel_id, rendered: true, persisted: true });
+  await groupReceiptScenario(c);
   await click(row());
   const downloadDirectory = await prepareNativeDownloadFixture(c);
   const fileName = `native-attachment-${c.nonce}.txt`;
@@ -674,9 +693,12 @@ export async function coreScenarios(c) {
   return { outbound, inbound, contents, selectedTheme: "light", rendered, minimumWindow: settingsTargets[1].request };
 }
 
-async function profileLayout(c) {
+export async function profileLayout(c) {
   await c.focusOwnedWindow();
-  const layout = await c.execute("const e=document.querySelector('[data-testid=open-profile]'),r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+1);return {viewport:{width:innerWidth,height:innerHeight},avatar:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},topEdgeHit:!!hit && (hit===e || e.contains(hit))};");
+  const layout = await c.until("profile trigger receives pointer input after modal retirement", async () => {
+    const observed = await c.execute("const e=document.querySelector('[data-testid=open-profile]');if(!e)return null;const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+1);return {viewport:{width:innerWidth,height:innerHeight},avatar:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},topEdgeHit:!!hit && (hit===e || e.contains(hit))};");
+    return observed?.topEdgeHit && observed;
+  });
   assert.equal(layout.topEdgeHit, true, "own avatar top edge receives pointer input");
   layout.chrome = null;
   if (process.platform === "darwin") {

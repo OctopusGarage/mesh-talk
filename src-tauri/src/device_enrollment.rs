@@ -148,7 +148,7 @@ fn stage_enrolled(
     enrolled: &EnrolledDevice,
     publish: impl FnOnce(&Path, &str, &str) -> Result<(), CommandError>,
 ) -> Result<crate::shared_account_login::AccountLogin, CommandError> {
-    let credentials =
+    let mut credentials =
         crate::shared_account_login::AccountLogin::decode(enrolled.access_snapshot())?;
     let profile = enrolled.profile().ok_or_else(|| {
         CommandError::LinkUpgradeRequired(
@@ -208,6 +208,18 @@ fn stage_enrolled(
         ] {
             reopened.set_device_sync_category(category, true)?;
         }
+    }
+    if let Some(policy) = credentials.security.take()
+        && policy.generation > 0
+    {
+        manager
+            .import_account_security(
+                &credentials.login_name,
+                &identity_password,
+                0,
+                policy.into_state(),
+            )
+            .map_err(|_| CommandError::Auth("Could not install account security policy".into()))?;
     }
     crate::shared_account_login::stage_applied_login(&directory, enrolled.access_snapshot())?;
     reopened

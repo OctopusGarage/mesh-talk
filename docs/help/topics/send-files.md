@@ -39,10 +39,15 @@ check that the destination is writable, then use the file's retry action.
 ## Copy text from an image
 
 In the macOS desktop app, click an ordinary image in the conversation to enlarge
-it. Move the pointer over the words, pause briefly, then drag to select the text.
-Press **Command-C**, or right-click the selection and choose **Copy text**. Recognition
-uses macOS Live Text and depends on the system's support for the image and language.
-When zoomed in, hold **Option** while dragging to select text rather than pan.
+it, then choose **Extract text** from the top-left button or the image menu.
+Recognition uses the Mac's system Vision framework. Select the words you need in
+the result panel and copy them, or choose **Copy all text**. Clipboard privacy
+settings still apply. If recognition fails, choose **Retry**; a blank image shows
+**No text found**. Closing the panel or preview releases its result.
+
+Recognition requires macOS 10.15 or later and varies by image quality and supported
+language. Large images are reduced before recognition. This action extracts text;
+it does not reproduce the original document layout.
 
 ## Image actions
 
@@ -85,3 +90,9 @@ JPEG with a maximum long edge of 1920 pixels.
 If access is denied, allow camera access in your operating system's privacy
 settings and retry. If the camera is unavailable or busy, close other apps using
 it and retry, or choose an existing photo instead.
+
+## Send a voice message
+
+Open the composer attachment tools and choose **Voice message**. Select **Record** to request the microphone and begin a recording of up to 30 seconds. Stop to listen, record again if needed, or choose **Send voice message** to send it as an ordinary encrypted attachment. Cancelling discards the recording.
+
+Receive and save the voice file the same way as any other attachment. Use **Reveal** to open its folder and play the file with a player that supports its format, including while offline.

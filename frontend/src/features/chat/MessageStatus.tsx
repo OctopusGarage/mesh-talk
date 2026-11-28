@@ -13,6 +13,7 @@ export function MessageStatus({
   icon,
   count,
   delivery,
+  deliveryCustody,
   custody,
   testId = "message-status",
   heading = label,
@@ -22,6 +23,7 @@ export function MessageStatus({
   icon: ReactNode;
   count?: string;
   delivery?: string;
+  deliveryCustody?: import("@/lib/api/chat").DeliveryCustody;
   custody?: number | "unknown";
   testId?: string;
   heading?: string;
@@ -48,6 +50,7 @@ export function MessageStatus({
         type="button"
         data-testid={`${testId}-trigger`}
         data-delivery={delivery}
+        data-delivery-custody={deliveryCustody}
         data-custody={custody}
         aria-label={label}
         aria-expanded={open}

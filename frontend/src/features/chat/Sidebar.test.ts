@@ -5,7 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
 
-const { chatState, policyState } = vi.hoisted(() => ({
+const { chatState, policyState, serialPoll } = vi.hoisted(() => ({
+  serialPoll: vi.fn(),
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
@@ -87,7 +88,7 @@ vi.mock("@/store/auth", () => {
 });
 vi.mock("@/store/settings", () => ({
   useSettings: (selector: (state: unknown) => unknown) =>
-    selector({ callsEnabled: false }),
+    selector({ callsEnabled: false, mutedGroups: [] }),
 }));
 vi.mock("@/store/presence", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/store/presence")>()),
@@ -118,7 +119,7 @@ vi.mock("@/components/GroupAvatar", () => ({
     createElement("span", {}, title),
 }));
 
-vi.mock("./useSerialPoll", () => ({ useSerialPoll: () => {} }));
+vi.mock("./useSerialPoll", () => ({ useSerialPoll: serialPoll }));
 vi.mock("./sidebar/SidebarUtilities", () => ({ SidebarUtilities: () => null }));
 import { Sidebar } from "./Sidebar";
 
@@ -186,6 +187,24 @@ it("keeps previous-account history accessible outside the active group list", ()
   expect(history?.[1]).not.toMatch(/\bopen(?:=|\s|$)/u);
   expect(history?.[2]).toContain("<button");
   expect(history?.[2]).toContain("Prior group");
+});
+
+it("waits for the runtime before starting optional network probes", () => {
+  serialPoll.mockClear();
+  chatState.ready = false;
+  renderToStaticMarkup(createElement(Sidebar));
+  expect(serialPoll.mock.calls.map(([enabled]) => enabled)).toEqual([
+    false,
+    false,
+  ]);
+
+  serialPoll.mockClear();
+  chatState.ready = true;
+  renderToStaticMarkup(createElement(Sidebar));
+  expect(serialPoll.mock.calls.map(([enabled]) => enabled)).toEqual([
+    true,
+    true,
+  ]);
 });
 
 it("keeps Message Yourself available without peers or loaded contacts", () => {

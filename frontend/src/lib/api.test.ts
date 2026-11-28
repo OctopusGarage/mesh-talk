@@ -6,6 +6,7 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { auth, avatars, chat, contactPolicy, favorites, settings } from "./api";
+import { diag } from "./api/diagnostics";
 import { createSettingsApi } from "./api/settings";
 import { useAuth } from "@/store/auth";
 
@@ -14,6 +15,22 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined);
   useAuth.setState({ user: null });
 });
+
+it.each([
+  ["  peer.example:47500  ", "peer.example", 47500],
+  ["2001:db8::1", "2001:db8::1", undefined],
+  ["[2001:db8::1]:47500", "2001:db8::1", 47500],
+  ["peer.example", "peer.example", undefined],
+] as const)(
+  "passes %s as a host and optional discovery port",
+  async (input, host, port) => {
+    await diag.probeEndpoint(input);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("probe_peer_endpoint", {
+      host,
+      port,
+    });
+  },
+);
 
 describe("media read IPC bytes", () => {
   it.each(["readMedia", "readFile", "readMediaPreview"] as const)(

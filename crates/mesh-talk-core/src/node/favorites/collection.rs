@@ -203,14 +203,10 @@ impl Node {
             .unwrap_or_else(|| who.into())
     }
 
-    pub(in crate::node) fn capture_favorite(
+    fn project_selected_source(
         &self,
-        mut source: FavoriteSource,
-        metadata: FavoriteMetadata,
-    ) -> Result<MessageFavorite, NodeError> {
-        if !valid_source(&source) || !valid_metadata(&metadata, &source) {
-            return Err(invalid("invalid favorite source or metadata"));
-        }
+        source: &FavoriteSource,
+    ) -> Result<Vec<HistoryEntry>, NodeError> {
         let selected_ids: Vec<_> = source
             .message_ids
             .iter()
@@ -235,14 +231,89 @@ impl Node {
             }
             (conv, None)
         };
-        let history: Vec<HistoryEntry> = self
+        Ok(self
             .project_history(
                 conv,
                 account,
                 crate::node::queries::HistorySelection::Selected(&selected_ids),
             )?
             .map(|c| c.messages)
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+
+    /// Capture the committed source version before projecting a LAN review item.
+    pub fn lan_review_source_epoch(&self) -> u64 {
+        self.storage.database().source_epoch()
+    }
+
+    /// Source writes wake an active review even when no guest requests are pending.
+    pub fn subscribe_lan_review_source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.storage.database().subscribe_source_changes()
+    }
+
+    /// Publish or disclose only while the projected source is still current.
+    /// The bounded callback never reads storage or performs network I/O.
+    pub fn with_lan_review_source<T>(&self, epoch: u64, handoff: impl FnOnce() -> T) -> Option<T> {
+        self.storage.database().with_source_epoch(epoch, handoff)
+    }
+
+    /// Read one current ordinary text item without including conversation metadata.
+    /// The caller must validate its current desktop session before disclosing it.
+    pub fn inspect_lan_review_text(
+        &self,
+        source: &FavoriteSource,
+    ) -> Result<LanReviewText, NodeError> {
+        if source.message_ids.len() != 1 || !valid_source(source) {
+            return Err(invalid("Select exactly one message for LAN review"));
+        }
+        let message = self
+            .project_selected_source(source)?
+            .into_iter()
+            .find(|entry| entry.id.to_hex() == source.message_ids[0])
+            .ok_or_else(|| invalid("Selected message is no longer available"))?;
+        if message.protection.is_some()
+            || message.recalled
+            || message
+                .expires_at_ms
+                .is_some_and(|end| end <= self.expiry_now())
+            || message.file.is_some()
+            || message.sticker.is_some()
+            || message.text.is_empty()
+            || message.text.len() > 16 * 1024
+        {
+            return Err(invalid("Selected message is not eligible for LAN review"));
+        }
+        let text = String::from_utf8(message.text)
+            .map_err(|_| invalid("Selected message is not valid UTF-8"))?;
+        let recipient_expires_at = message.expires_at_ms.and_then(|deadline| {
+            self.expiry_first_seen
+                .lock()
+                .expect("expiry mutex")
+                .get(&message.id)
+                .map(|first| {
+                    *first
+                        + super::super::expiry_policy::recipient_lifetime(
+                            deadline,
+                            message.wall_clock,
+                        )
+                })
+        });
+        Ok(LanReviewText {
+            text,
+            expires_at_ms: message.expires_at_ms,
+            recipient_expires_at,
+        })
+    }
+
+    pub(in crate::node) fn capture_favorite(
+        &self,
+        mut source: FavoriteSource,
+        metadata: FavoriteMetadata,
+    ) -> Result<MessageFavorite, NodeError> {
+        if !valid_source(&source) || !valid_metadata(&metadata, &source) {
+            return Err(invalid("invalid favorite source or metadata"));
+        }
+        let history = self.project_selected_source(&source)?;
         let selected: BTreeSet<_> = source.message_ids.iter().cloned().collect();
         let mut messages = Vec::new();
         for e in history {
@@ -475,21 +546,20 @@ impl Node {
         }
         Ok(())
     }
-    pub(in crate::node) fn prune_favorite_files(&self) -> Result<(), NodeError> {
+    pub(in crate::node) fn prune_favorite_files(&self) -> Result<bool, NodeError> {
         let mut store = self.favorites.lock().expect("favorites mutex");
+        let favorites_revision = *store.changes.borrow();
         let now = self.expiry_now();
         let media = self
             .favorite_media
             .inventory_revision()
             .map_err(|e| NodeError::File(e.to_string()))?;
-        if let Some(media) = media
-            && store.media_prune.as_ref().is_some_and(|prior| {
-                prior.favorites == store.mutation_revision
-                    && prior.media == media
-                    && prior.next_expiry.is_none_or(|deadline| now < deadline)
-            })
+        if let Some(prior) = &store.media_prune
+            && media == Some(prior.media)
+            && prior.favorites == favorites_revision
+            && prior.next_expiry.is_none_or(|deadline| now < deadline)
         {
-            return Ok(());
+            return Ok(prior.next_expiry.is_some());
         }
         // An unsuccessful pass must never certify an unchanged namespace.
         store.media_prune = None;
@@ -508,12 +578,15 @@ impl Node {
                 .filter(|deadline| *deadline > now)
                 .min();
             store.media_prune = Some(FavoriteMediaPrune {
-                favorites: store.mutation_revision,
+                favorites: favorites_revision,
                 media,
                 next_expiry,
             });
         }
-        Ok(())
+        Ok(store
+            .media_prune
+            .as_ref()
+            .is_none_or(|prior| prior.next_expiry.is_some()))
     }
     pub(in crate::node) fn missing_favorite_files(&self) -> Vec<ConversationId> {
         let store = self.favorites.lock().expect("favorites mutex");

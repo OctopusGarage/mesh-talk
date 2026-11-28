@@ -1,4 +1,4 @@
-//! Device-local expiry for discovered accounts that never had durable history.
+//! Device-local reclamation for offline accounts that never had durable history.
 use super::*;
 
 use crate::chat_commands::AccountInfo;
@@ -11,16 +11,30 @@ const MAX_EXPIRY_BYTES: u64 = 512 * 1024;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FirstObservations {
+    #[serde(default)]
+    version: u8,
     contacts: BTreeMap<String, ObservedContact>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ObservedContact {
-    first_seen_ms: u64,
+    /// None while online; otherwise the first local observation of this absence.
+    #[serde(default, alias = "first_seen_ms")]
+    offline_since_ms: Option<u64>,
     ever_history: bool,
-    #[serde(default)]
-    expired: bool,
+    /// Read old journals without preserving their permanent expiry tombstones.
+    #[serde(default, rename = "expired", skip_serializing)]
+    _legacy_expired: bool,
+}
+
+type HistoryClassifier<'a> = dyn Fn(&[String]) -> Result<HashSet<String>, String> + 'a;
+
+pub(crate) struct ContactExpiryInputs<'a> {
+    pub ever_history: &'a HashSet<String>,
+    pub online: &'a HashSet<String>,
+    pub deleted: &'a HashSet<String>,
+    pub history_for_absent: &'a HistoryClassifier<'a>,
 }
 
 impl HiddenContactsState {
@@ -31,22 +45,19 @@ impl HiddenContactsState {
             .join(format!("empty-contacts-{own_account}.json"))
     }
 
-    /// Caller owns the existing policy/session transaction. No lock is acquired
-    /// here: expiry must compose with explicit visibility without reversing order.
+    /// The existing policy/session transaction owns observation and commit. No
+    /// worker, polling loop or lock is added; the caller's roster refresh drives it.
     pub(crate) fn expire_empty_accounts(
         &self,
         owner: &str,
         own_account: &str,
         rows: &mut Vec<AccountInfo>,
-        ever_history: &HashSet<String>,
         now_ms: u64,
+        inputs: ContactExpiryInputs<'_>,
     ) -> Result<(), String> {
         authorize(Some(owner), owner)?;
         if !valid_account(own_account) {
             return Err("Invalid expiry account".into());
-        }
-        if rows.is_empty() {
-            return Ok(());
         }
         let path = self.expiry_path(owner, own_account);
         let mut journal = match std::fs::File::open(&path) {
@@ -60,50 +71,92 @@ impl HiddenContactsState {
                 }
                 serde_json::from_slice::<FirstObservations>(&bytes).map_err(|e| e.to_string())?
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                FirstObservations::default()
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => FirstObservations {
+                version: 1,
+                ..Default::default()
+            },
             Err(error) => return Err(error.to_string()),
         };
-        if journal.contacts.len() > MAX_EXPIRY_CONTACTS
+        if journal.version > 1
+            || journal.contacts.len() > MAX_EXPIRY_CONTACTS
             || journal.contacts.keys().any(|id| !valid_account(id))
         {
             return Err("Invalid contact expiry journal".into());
         }
-        let mut changed = false;
-        for row in rows.iter() {
-            if row.account_id == own_account || !valid_account(&row.account_id) {
-                continue;
-            }
-            let history = ever_history.contains(&row.account_id);
-            if let Some(observed) = journal.contacts.get_mut(&row.account_id) {
-                if history && !observed.ever_history {
-                    observed.ever_history = true;
-                    changed = true;
-                }
-            } else if journal.contacts.len() < MAX_EXPIRY_CONTACTS {
-                journal.contacts.insert(
-                    row.account_id.clone(),
-                    ObservedContact {
-                        first_seen_ms: now_ms,
-                        ever_history: history,
-                        expired: false,
-                    },
-                );
-                changed = true;
-            }
-            if let Some(observed) = journal.contacts.get_mut(&row.account_id)
-                && !observed.ever_history
-                && !observed.expired
-                && now_ms
-                    >= observed
-                        .first_seen_ms
-                        .saturating_add(EMPTY_CONTACT_LIFETIME_MS)
-            {
-                observed.expired = true;
-                changed = true;
+        // Recheck absent pending contacts before reclamation too: a first
+        // message may have committed and been cleared since the last roster read.
+        let listed: HashSet<_> = rows.iter().map(|row| row.account_id.as_str()).collect();
+        let absent: Vec<_> = journal
+            .contacts
+            .iter()
+            .filter(|(account, observed)| {
+                !observed.ever_history
+                    && !listed.contains(account.as_str())
+                    && !inputs.deleted.contains(*account)
+            })
+            .map(|(account, _)| account.clone())
+            .collect();
+        let mut ever_history = inputs.ever_history.clone();
+        if !absent.is_empty() {
+            ever_history.extend((inputs.history_for_absent)(&absent)?);
+        }
+        // Old first-observation clocks cannot establish when a contact went
+        // offline. Start conservatively at this observation; online cancels it.
+        let mut changed = journal.version == 0;
+        if journal.version == 0 {
+            journal.version = 1;
+            for (account, observed) in &mut journal.contacts {
+                observed.offline_since_ms = (!inputs.online.contains(account)).then_some(now_ms);
             }
         }
+        for row in rows.iter() {
+            if row.account_id == own_account
+                || !valid_account(&row.account_id)
+                || inputs.deleted.contains(&row.account_id)
+                || ever_history.contains(&row.account_id)
+                || !inputs.online.contains(&row.account_id)
+                || journal.contacts.contains_key(&row.account_id)
+                || journal.contacts.len() >= MAX_EXPIRY_CONTACTS
+            {
+                continue;
+            }
+            journal.contacts.insert(
+                row.account_id.clone(),
+                ObservedContact {
+                    offline_since_ms: None,
+                    ever_history: false,
+                    _legacy_expired: false,
+                },
+            );
+            changed = true;
+        }
+        // Include absent roster entries: losing all discovery routes must start
+        // the offline grace period, not strand metadata forever.
+        journal.contacts.retain(|account, observed| {
+            if account == own_account || inputs.deleted.contains(account) {
+                changed = true;
+                return false;
+            }
+            if ever_history.contains(account) && !observed.ever_history {
+                observed.ever_history = true;
+                changed = true;
+            }
+            if observed.ever_history || inputs.online.contains(account) {
+                if observed.offline_since_ms.take().is_some() {
+                    changed = true;
+                }
+            } else {
+                let since = *observed.offline_since_ms.get_or_insert_with(|| {
+                    changed = true;
+                    now_ms
+                });
+                if now_ms >= since.saturating_add(EMPTY_CONTACT_LIFETIME_MS) {
+                    changed = true;
+                    return false;
+                }
+            }
+            true
+        });
         if changed {
             let parent = path.parent().ok_or("Invalid expiry journal path")?;
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -117,7 +170,11 @@ impl HiddenContactsState {
                     .set_permissions(std::fs::Permissions::from_mode(0o600))
                     .map_err(|e| e.to_string())?;
             }
-            serde_json::to_writer(&mut temporary, &journal).map_err(|e| e.to_string())?;
+            let bytes = serde_json::to_vec(&journal).map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > MAX_EXPIRY_BYTES {
+                return Err("Contact expiry journal too large".into());
+            }
+            std::io::Write::write_all(&mut temporary, &bytes).map_err(|e| e.to_string())?;
             temporary.flush().map_err(|e| e.to_string())?;
             temporary.as_file().sync_all().map_err(|e| e.to_string())?;
             temporary.persist(&path).map_err(|e| e.to_string())?;
@@ -129,30 +186,41 @@ impl HiddenContactsState {
                 log::warn!("Contact expiry committed; directory durability sync unavailable");
             }
         }
-        // Persist before publishing any deadline or omission. Retain expired keys
-        // so continuous discovery cannot recreate them. Saturation fails open for
-        // new accounts; keys are not evicted because that would renew old clocks.
+        // Commit reclamation before publishing it. No expired IDs remain on
+        // disk; stale offline routes cannot re-enrol them without new Online.
         rows.retain_mut(|row| {
-            row.contact_expires_at_ms =
-                if row.account_id == own_account || ever_history.contains(&row.account_id) {
-                    None
-                } else {
-                    journal
-                        .contacts
-                        .get(&row.account_id)
-                        .filter(|observed| !observed.ever_history)
-                        .map(|observed| {
-                            observed
-                                .first_seen_ms
-                                .saturating_add(EMPTY_CONTACT_LIFETIME_MS)
-                        })
-                };
-            row.contact_expires_at_ms.is_none()
-                || !journal
-                    .contacts
-                    .get(&row.account_id)
-                    .is_some_and(|observed| observed.expired)
+            row.contact_expires_at_ms = None;
+            if inputs.deleted.contains(&row.account_id) {
+                return false;
+            }
+            if row.account_id == own_account
+                || ever_history.contains(&row.account_id)
+                || inputs.online.contains(&row.account_id)
+            {
+                return true;
+            }
+            let Some(observed) = journal.contacts.get(&row.account_id) else {
+                return false;
+            };
+            row.contact_expires_at_ms = observed
+                .offline_since_ms
+                .map(|since| since.saturating_add(EMPTY_CONTACT_LIFETIME_MS));
+            true
         });
+        let existing: HashSet<_> = rows.iter().map(|row| row.account_id.clone()).collect();
+        for (account, observed) in &journal.contacts {
+            if !existing.contains(account) {
+                rows.push(AccountInfo {
+                    account_id: account.clone(),
+                    device_count: 0,
+                    names: Vec::new(),
+                    contact_expires_at_ms: observed
+                        .offline_since_ms
+                        .map(|since| since.saturating_add(EMPTY_CONTACT_LIFETIME_MS)),
+                });
+            }
+        }
+        rows.sort_by(|left, right| left.account_id.cmp(&right.account_id));
         Ok(())
     }
 }
@@ -162,174 +230,254 @@ mod tests {
     use super::*;
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ME: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn observe(
+        store: &HiddenContactsState,
+        rows: &mut Vec<AccountInfo>,
+        now: u64,
+        online: &[&str],
+        history: &[&str],
+        deleted: &[&str],
+    ) -> Result<(), String> {
+        store.expire_empty_accounts(
+            "alice",
+            ME,
+            rows,
+            now,
+            ContactExpiryInputs {
+                online: &online.iter().map(|id| (*id).to_owned()).collect(),
+                ever_history: &history.iter().map(|id| (*id).to_owned()).collect(),
+                deleted: &deleted.iter().map(|id| (*id).to_owned()).collect(),
+                history_for_absent: &|_| Ok(history.iter().map(|id| (*id).to_owned()).collect()),
+            },
+        )
+    }
+    fn saved(store: &HiddenContactsState) -> FirstObservations {
+        serde_json::from_slice(&std::fs::read(store.expiry_path("alice", ME)).unwrap()).unwrap()
+    }
+
     #[test]
-    fn empty_contact_expiry_is_exact_and_survives_restart_and_rediscovery() {
+    fn offline_contact_restarts_grace_period_and_reclaims_metadata_without_tombstones() {
         let root = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(root.path().into());
         let mut rows = vec![row(A), row(A)];
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 100)
-            .unwrap();
-        assert_eq!(rows[0].contact_expires_at_ms, Some(86_400_100));
-        let journal = store.expiry_path("alice", ME);
-        let before = std::fs::metadata(&journal).unwrap().modified().unwrap();
-        let persisted: FirstObservations =
-            serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        observe(&store, &mut rows, 100, &[A], &[], &[]).unwrap();
+        assert!(rows.iter().all(|row| row.contact_expires_at_ms.is_none()));
         assert_eq!(
-            persisted.contacts.len(),
+            saved(&store).contacts.len(),
             1,
-            "two devices share one account clock"
+            "devices share an account clock"
         );
-        rows[0].names = vec!["Renamed device".into()];
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 200)
-            .unwrap();
+        let path = store.expiry_path("alice", ME);
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        observe(&store, &mut rows, 100_000_000, &[A], &[], &[]).unwrap();
         assert_eq!(
-            std::fs::metadata(&journal).unwrap().modified().unwrap(),
-            before,
-            "unchanged discovery must not rewrite the clock journal"
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified,
+            "unchanged online observations must not write"
         );
+        rows.clear(); // The entire peer disappeared, not merely one of its routes.
+        observe(&store, &mut rows, 100_000_100, &[], &[], &[]).unwrap();
+        assert_eq!(rows[0].contact_expires_at_ms, Some(186_400_100));
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        observe(&store, &mut rows, 100_000_200, &[], &[], &[]).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        // Reconnect cancels the first deadline; the next disconnect gets 24h.
+        observe(&store, &mut rows, 186_400_099, &[A], &[], &[]).unwrap();
+        assert_eq!(rows[0].contact_expires_at_ms, None);
+        observe(&store, &mut rows, 200_000_000, &[], &[], &[]).unwrap();
+        assert_eq!(rows[0].contact_expires_at_ms, Some(286_400_000));
         let reopened = HiddenContactsState::new(root.path().into());
-        let mut rows = vec![row(A)];
-        reopened
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 86_400_099)
-            .unwrap();
+        observe(&reopened, &mut rows, 286_399_999, &[], &[], &[]).unwrap();
         assert_eq!(rows.len(), 1);
-        reopened
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 86_400_100)
-            .unwrap();
+        observe(&reopened, &mut rows, 286_400_000, &[], &[], &[]).unwrap();
         assert!(rows.is_empty());
+        assert!(
+            saved(&reopened).contacts.is_empty(),
+            "delete metadata, not merely the visible row"
+        );
+        assert!(std::fs::metadata(&path).unwrap().len() < 64);
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut stale = vec![row(A)];
+        observe(&reopened, &mut stale, 286_400_001, &[], &[], &[]).unwrap();
+        assert!(
+            stale.is_empty(),
+            "stale offline routes cannot recreate deleted contacts"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        let mut returned = vec![row(A)];
+        observe(&reopened, &mut returned, 300_000_000, &[A], &[], &[]).unwrap();
+        assert_eq!(
+            returned.len(),
+            1,
+            "new online discovery can recreate a contact"
+        );
+        assert_eq!(returned[0].contact_expires_at_ms, None);
+    }
+
+    #[test]
+    fn ever_chatted_contacts_survive_offline_expiry_and_later_history_clear() {
+        let root = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(root.path().into());
         let mut rows = vec![row(A)];
-        reopened
+        observe(&store, &mut rows, 100, &[A], &[], &[]).unwrap();
+        observe(&store, &mut rows, 200, &[], &[A], &[]).unwrap();
+        assert!(saved(&store).contacts[A].ever_history);
+        rows.clear();
+        let reopened = HiddenContactsState::new(root.path().into());
+        observe(&reopened, &mut rows, 100_000_000, &[], &[], &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contact_expires_at_ms, None);
+        // A durable indexed contact does not require an expiry record at all.
+        let other = "cccccccccccccccccccccccccccccccc";
+        rows.push(row(other));
+        observe(&reopened, &mut rows, 200_000_000, &[], &[other], &[]).unwrap();
+        assert!(rows.iter().any(|row| row.account_id == other));
+        assert!(!saved(&store).contacts.contains_key(other));
+    }
+
+    #[test]
+    fn absent_contact_history_is_rechecked_before_reclamation_and_failure_preserves_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(root.path().into());
+        let mut rows = vec![row(A)];
+        observe(&store, &mut rows, 1, &[A], &[], &[]).unwrap();
+        rows.clear();
+        observe(&store, &mut rows, 2, &[], &[], &[]).unwrap();
+        rows.clear();
+        let path = store.expiry_path("alice", ME);
+        let before = std::fs::read(&path).unwrap();
+        let none = HashSet::new();
+        assert!(
+            store
+                .expire_empty_accounts(
+                    "alice",
+                    ME,
+                    &mut rows,
+                    86_400_002,
+                    ContactExpiryInputs {
+                        online: &none,
+                        deleted: &none,
+                        ever_history: &none,
+                        history_for_absent: &|accounts| {
+                            assert_eq!(accounts, &[A.to_owned()]);
+                            Err("unavailable index".into())
+                        },
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "uncertainty must never delete data"
+        );
+        store
             .expire_empty_accounts(
                 "alice",
                 ME,
                 &mut rows,
-                &HashSet::from([A.into()]),
-                99_000_000,
+                86_400_002,
+                ContactExpiryInputs {
+                    online: &none,
+                    deleted: &none,
+                    ever_history: &none,
+                    history_for_absent: &|accounts| {
+                        assert_eq!(accounts, &[A.to_owned()]);
+                        Ok(HashSet::from([A.to_owned()]))
+                    },
+                },
             )
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].contact_expires_at_ms, None);
-        // A later cleared legacy transcript must not lose observed history.
-        reopened
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 100_000_000)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].contact_expires_at_ms, None);
+        assert!(saved(&store).contacts[A].ever_history);
     }
+
     #[test]
-    fn expiry_remains_consumed_after_clock_rollback_and_restart() {
+    fn legacy_expired_records_migrate_conservatively_and_explicit_deletion_wins() {
         let root = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(root.path().into());
+        let path = store.expiry_path("alice", ME);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = serde_json::json!({"contacts": { A: {"first_seen_ms":0,"ever_history":false,"expired":true} }});
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let mut rows = vec![row(A)];
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 100)
-            .unwrap();
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 86_400_100)
-            .unwrap();
-        assert!(rows.is_empty());
-        let reopened = HiddenContactsState::new(root.path().into());
-        let mut rows = vec![row(A)];
-        reopened
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 86_400_099)
-            .unwrap();
+        observe(&store, &mut rows, 100_000_000, &[A], &[], &[]).unwrap();
+        assert_eq!(rows[0].contact_expires_at_ms, None);
+        assert!(
+            !String::from_utf8(std::fs::read(&path).unwrap())
+                .unwrap()
+                .contains("expired")
+        );
+        rows.clear();
+        observe(&store, &mut rows, 200_000_000, &[], &[], &[]).unwrap();
+        assert_eq!(rows[0].contact_expires_at_ms, Some(286_400_000));
+        observe(&store, &mut rows, 200_000_100, &[A], &[], &[A]).unwrap();
         assert!(
             rows.is_empty(),
-            "a consumed expiry must survive a backwards wall clock"
+            "online presence must not undo explicit deletion"
         );
-        let mut rows = vec![row(A)];
-        reopened
-            .expire_empty_accounts(
-                "alice",
-                ME,
-                &mut rows,
-                &HashSet::from([A.into()]),
-                86_400_099,
-            )
-            .unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "a first committed conversation restores the account"
-        );
-        reopened
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 50)
-            .unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "later clearing and clock rollback retain history protection"
-        );
+        assert!(saved(&store).contacts.is_empty());
     }
+
     #[test]
-    fn expiry_scopes_owner_identity_and_preserves_journal_on_failure() {
+    fn corrupt_oversized_and_failed_journals_preserve_visible_rows_and_original_bytes() {
         let root = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(root.path().into());
-        let mut rows = vec![row(A), row(ME)];
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 100)
-            .unwrap();
-        assert_eq!(rows[1].contact_expires_at_ms, None);
-        let mut other = vec![row(A)];
-        store
-            .expire_empty_accounts("bob", ME, &mut other, &HashSet::new(), 200)
-            .unwrap();
-        assert_eq!(other[0].contact_expires_at_ms, Some(86_400_200));
-        let mut adopted = vec![row(ME)];
-        store
-            .expire_empty_accounts("alice", A, &mut adopted, &HashSet::new(), 300)
-            .unwrap();
-        assert_eq!(adopted[0].contact_expires_at_ms, Some(86_400_300));
+        let mut rows = vec![row(A)];
+        observe(&store, &mut rows, 1, &[A], &[], &[]).unwrap();
         let path = store.expiry_path("alice", ME);
-        let bytes = std::fs::read(&path).unwrap();
-        std::fs::write(&path, b"corrupt").unwrap();
-        let mut rows = vec![row(A)];
-        assert!(
-            store
-                .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 99_000_000)
-                .is_err()
-        );
+        for bytes in [
+            b"corrupt".to_vec(),
+            vec![b' '; MAX_EXPIRY_BYTES as usize + 1],
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(observe(&store, &mut rows, 100_000_000, &[], &[], &[]).is_err());
+            assert_eq!(rows.len(), 1);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        let blocked = root.path().join("blocked");
+        std::fs::write(&blocked, b"original").unwrap();
+        let blocked = HiddenContactsState::new(blocked);
+        assert!(observe(&blocked, &mut rows, 1, &[A], &[], &[]).is_err());
         assert_eq!(rows.len(), 1);
-        assert_eq!(std::fs::read(&path).unwrap(), b"corrupt");
-        let oversized = vec![b' '; 524_289];
-        std::fs::write(&path, &oversized).unwrap();
-        assert!(
-            store
-                .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 99_000_000)
-                .is_err()
-        );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 524_289);
-        std::fs::write(&path, bytes).unwrap();
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 99_000_000)
-            .unwrap();
-        assert!(rows.is_empty());
     }
+
     #[test]
-    fn expiry_saturation_is_fail_open_without_restarting_recorded_clocks() {
+    fn offline_reclamation_releases_capacity_without_rewriting_unchanged_online_contacts() {
         let root = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(root.path().into());
-        let mut rows: Vec<_> = (0..4096).map(|i| row(&format!("{i:032x}"))).collect();
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 1)
-            .unwrap();
+        let ids: Vec<_> = (0..MAX_EXPIRY_CONTACTS)
+            .map(|i| format!("{i:032x}"))
+            .collect();
+        let mut rows: Vec<_> = ids.iter().map(|id| row(id)).collect();
+        let online: Vec<_> = ids.iter().map(String::as_str).collect();
+        observe(&store, &mut rows, 1, &online, &[], &[]).unwrap();
+        assert_eq!(saved(&store).contacts.len(), MAX_EXPIRY_CONTACTS);
         assert!(
             std::fs::metadata(store.expiry_path("alice", ME))
                 .unwrap()
                 .len()
-                <= 524_288
+                <= MAX_EXPIRY_BYTES
         );
-        let mut rows = vec![row(A), row("00000000000000000000000000000000")];
-        store
-            .expire_empty_accounts("alice", ME, &mut rows, &HashSet::new(), 86_400_001)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].account_id, A);
-        assert_eq!(rows[0].contact_expires_at_ms, None);
+        rows.clear();
+        observe(&store, &mut rows, 2, &[], &[], &[]).unwrap();
+        assert_eq!(rows.len(), MAX_EXPIRY_CONTACTS);
+        observe(&store, &mut rows, 86_400_002, &[], &[], &[]).unwrap();
+        assert!(rows.is_empty());
+        assert!(saved(&store).contacts.is_empty());
+        let mut rows = vec![row(A)];
+        observe(&store, &mut rows, 86_400_003, &[A], &[], &[]).unwrap();
+        assert!(saved(&store).contacts.contains_key(A));
     }
+
     #[test]
     fn native_empty_contact_expiry_preserves_transport_and_incoming_history() {
         use mesh_talk_core::node::NodeRuntime;
@@ -391,17 +539,24 @@ mod tests {
         // its original failure before any app/store/temp-directory destruction.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tauri::async_runtime::block_on(async {
-                bob.probe_endpoint(([127, 0, 0, 1], alice_port).into())
-                    .await
-                    .unwrap();
+                // Provision real signed discovery just as the other native
+                // contact-policy fixture does. This expiry test does not use
+                // the shared GUI reactor's UDP-send timing as its setup oracle.
+                let announce = |sender: &NodeRuntime, port| {
+                    let proof = sender
+                        .handle()
+                        .signed_announce(sender.display_name(), sender.listen_tcp_port());
+                    assert!(proof.verify());
+                    let bytes = mesh_talk_core::discovery::announce::encode(&proof);
+                    std::net::UdpSocket::bind("127.0.0.1:0")
+                        .unwrap()
+                        .send_to(&bytes, (std::net::Ipv4Addr::LOCALHOST, port))
+                        .unwrap();
+                };
+                announce(&bob, alice_port);
                 {
                     let guard = nodes.0.read().await;
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .probe_endpoint(([127, 0, 0, 1], bob_port).into())
-                        .await
-                        .unwrap();
+                    announce(guard.as_ref().unwrap(), bob_port);
                 }
                 let query =
                     || crate::chat_commands::list_accounts(app.state(), app.state(), app.state());
@@ -429,7 +584,7 @@ mod tests {
                         .find(|row| row.account_id == bob_account)
                         .unwrap()
                         .contact_expires_at_ms
-                        .is_some()
+                        .is_none()
                 );
                 assert!(
                     !alice_handle
@@ -448,7 +603,7 @@ mod tests {
                     .contacts
                     .get_mut(&bob_account)
                     .unwrap()
-                    .first_seen_ms = 0;
+                    .offline_since_ms = Some(0);
                 let expired = serde_json::to_vec(&journal).unwrap();
                 std::fs::write(&path, b"unreadable journal").unwrap();
                 let uncertain = query().await.unwrap();
@@ -464,11 +619,28 @@ mod tests {
                 assert_eq!(std::fs::read(&path).unwrap(), b"unreadable journal");
                 std::fs::write(&path, expired).unwrap();
                 assert!(
-                    !query()
+                    query()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.account_id == bob_account),
+                    "online discovery must override automatic expiry"
+                );
+                let persisted: FirstObservations =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(persisted.contacts[&bob_account].offline_since_ms, None);
+                let before = std::fs::read(&path).unwrap();
+                assert!(
+                    query()
                         .await
                         .unwrap()
                         .iter()
                         .any(|row| row.account_id == bob_account)
+                );
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    before,
+                    "unchanged online reads must not write the journal"
                 );
                 assert!(
                     alice_handle

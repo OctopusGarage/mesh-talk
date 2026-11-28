@@ -11,6 +11,27 @@ pub(super) trait SessionBackend {
     type View;
     type HaveCursor;
     type ExportCursor;
+    fn supports_file_chunk_scope(&self, _file: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    fn available_file_chunks(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _start: u32,
+        _count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        Ok(None)
+    }
+    fn export_file_chunk(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _index: u32,
+        _encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
     fn bind_session_peer(&self, _peer: &crate::identity::device::PublicIdentity) {}
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         None
@@ -51,6 +72,9 @@ pub(super) trait SessionBackend {
     }
     fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
         Ok(Some(view))
+    }
+    fn retain_limited_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        self.retain_custody_view(view)
     }
     fn prepare_view_step(
         &self,
@@ -442,6 +466,9 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .expect("store mutex not poisoned")
             .take_custody_view(c)
     }
+    fn retain_limited_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
+        self.0.lock().expect("store lock").retain_range_view(view)
+    }
     fn retain_custody_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
         self.0
             .lock()
@@ -500,6 +527,36 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .prepare_export_step(v, have, budget)
+    }
+    fn supports_file_chunk_scope(&self, file: &ConversationId) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .supports_file_chunk_scope(file)
+    }
+    fn available_file_chunks(
+        &self,
+        view: &S::View,
+        author: crate::eventlog::Author,
+        start: u32,
+        count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .available_file_chunks(view, author, start, count)
+    }
+    fn export_file_chunk(
+        &self,
+        view: &S::View,
+        author: crate::eventlog::Author,
+        index: u32,
+        encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .export_file_chunk(view, author, index, encoded_limit)
     }
     fn metadata(&self, v: &S::View) -> Result<SyncMetadata, LogError> {
         self.0.lock().expect("store mutex not poisoned").metadata(v)
@@ -632,6 +689,11 @@ pub(super) async fn prepare_view<B: SessionBackend>(
     backend: &B,
     view: &B::View,
 ) -> Result<(), SessionError> {
+    // A qualified ready cache hit must stay read-only. Partial or changed
+    // selections still pass through bounded preparation and fresh validation.
+    if backend.reusable_view(view)? {
+        return Ok(());
+    }
     loop {
         if backend
             .prepare_view_step(view, PreparationBudget::default())?
@@ -649,10 +711,19 @@ pub(super) async fn open_prepared_view<B: SessionBackend>(
 ) -> Result<B::View, SessionError> {
     // Check out the existing exclusive connection lease before allocating a
     // new durable selection. The backend rechecks exact source and authority.
-    if let Some(view) = backend.take_custody_view(conversation)? {
-        return Ok(view);
-    }
-    let view = backend.open_view(conversation)?;
+    // A retained range selection may still be partially prepared. Checkout
+    // qualifies its owner and authority, but does not establish readiness.
+    let view = match backend.take_custody_view(conversation)? {
+        Some(view) if backend.reusable_view(&view)? => view,
+        Some(view) => {
+            // An independent custody request needs the current source cut.
+            // Range checkout may legitimately preserve an older continuation;
+            // that exception must not become a completed legacy Have answer.
+            drop(view);
+            backend.open_view(conversation)?
+        }
+        None => backend.open_view(conversation)?,
+    };
     prepare_view(backend, &view).await?;
     Ok(view)
 }
@@ -675,6 +746,50 @@ pub(super) async fn prepared_probe<B: SessionBackend>(
     Ok((metadata, view))
 }
 
+pub(super) async fn bounded_view<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<B::View, SessionError> {
+    let view = match backend.take_custody_view(conversation)? {
+        Some(view) => view,
+        None => backend.open_view(conversation)?,
+    };
+    for _ in 0..4 {
+        if backend
+            .prepare_view_step(&view, PreparationBudget::default())?
+            .ready
+        {
+            backend.validate_view(&view)?;
+            return Ok(view);
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(backend.retain_limited_view(view)?);
+    Err(SessionError::ResourceUnavailable)
+}
+pub(super) async fn bounded_probe<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<(SyncMetadata, Option<B::View>), SessionError> {
+    let (metadata, view) = backend.probe_metadata(conversation)?;
+    if let (Some(metadata), None) = (&metadata, &view) {
+        return Ok((*metadata, None));
+    }
+    let view = view.ok_or_else(|| LogError::CorruptFile("probe has no metadata or view".into()))?;
+    for _ in 0..4 {
+        if backend
+            .prepare_view_step(&view, PreparationBudget::default())?
+            .ready
+        {
+            backend.validate_view(&view)?;
+            return Ok((backend.metadata(&view)?, Some(view)));
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(backend.retain_limited_view(view)?);
+    Err(SessionError::ResourceUnavailable)
+}
+
 pub(super) fn have_count(count: u64) -> Result<usize, SessionError> {
     let count = usize::try_from(count).map_err(|_| SessionError::UnexpectedMessage)?;
     if count > MAX_HAVE_IDS_TOTAL {
@@ -682,81 +797,45 @@ pub(super) fn have_count(count: u64) -> Result<usize, SessionError> {
     }
     Ok(count)
 }
-pub(super) fn unsupported_metadata(
-    m: SyncMetadata,
-    v2: bool,
-    v3: bool,
-    v4: bool,
-    v5: bool,
-) -> bool {
-    (!v2 && m.channel_v2) || (!v3 && m.channel_v3) || (!v4 && m.channel_v4) || (!v5 && m.channel_v5)
+struct SessionHaveSource<'a, B: SessionBackend> {
+    backend: &'a B,
+    view: &'a B::View,
+    scan_budget: Option<(usize, usize)>,
 }
 
-pub(super) async fn send_have_pages<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
-    channel: &mut SecureChannel<IO>,
-    backend: &B,
-    view: &B::View,
-    conversation: ConversationId,
-    wrap: fn(HaveChunk) -> SyncWire,
-) -> Result<(), SessionError> {
-    let expected_count = have_count(backend.advertised_count(view)?)?;
-    let mut cursor = None;
-    let mut ids = 0usize;
-    let mut chunks = 0usize;
-    let mut pending = Vec::with_capacity(expected_count.min(HAVE_IDS_PER_CHUNK));
-    loop {
-        // Keep the last chunk until actual EOF. One lookahead ID proves that a
-        // full pending chunk has a successor, even across empty scanning pages.
-        // At most 1500 pending IDs plus that one lookahead ID are resident.
-        let capacity = HAVE_IDS_PER_CHUNK - pending.len();
-        let budget = IdPageBudget {
-            ids: capacity.max(1),
-            examined: HAVE_IDS_PER_CHUNK,
+impl<B: SessionBackend> mesh_replication::session::HaveSource for SessionHaveSource<'_, B> {
+    type Id = EventId;
+    type Cursor = B::HaveCursor;
+    type Error = SessionError;
+
+    fn page(
+        &mut self,
+        cursor: Option<&Self::Cursor>,
+        ids: usize,
+        examined: usize,
+    ) -> Result<mesh_replication::session::HavePage<EventId, Self::Cursor>, SessionError> {
+        let examined = match self.scan_budget {
+            Some((0, _) | (_, 0)) => return Err(SessionError::ResourceUnavailable),
+            Some((_, remaining)) => examined.min(remaining),
+            None => examined,
         };
-        let page = backend.have_page(view, cursor.as_ref(), budget)?;
-        ids = ids
-            .checked_add(page.items.len())
-            .ok_or(SessionError::UnexpectedMessage)?;
-        if page.items.len() > budget.ids || ids > MAX_HAVE_IDS_TOTAL {
-            return Err(SessionError::UnexpectedMessage);
+        let page = self
+            .backend
+            .have_page(self.view, cursor, IdPageBudget { ids, examined })?;
+        if let Some((pages, rows)) = &mut self.scan_budget {
+            *pages -= 1;
+            *rows = rows
+                .checked_sub(page.examined)
+                .ok_or(SessionError::ResourceUnavailable)?;
         }
-        cursor = page.next;
-        if !page.items.is_empty() && capacity == 0 {
-            chunks += 1;
-            if chunks > MAX_HAVE_CHUNKS {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            let bytes = encode(&wrap(HaveChunk {
-                conversation,
-                ids: std::mem::take(&mut pending),
-                more: true,
-            }))?;
-            backend.validate_view(view)?;
-            channel.send(&bytes).await?;
-        }
-        pending.reserve_exact(page.items.len());
-        pending.extend(page.items);
-        if cursor.is_none() {
-            if ids != expected_count {
-                return Err(LogError::CorruptFile(
-                    "network Have count disagrees with captured view".into(),
-                )
-                .into());
-            }
-            chunks += 1;
-            if chunks > MAX_HAVE_CHUNKS {
-                return Err(SessionError::UnexpectedMessage);
-            }
-            let bytes = encode(&wrap(HaveChunk {
-                conversation,
-                ids: pending,
-                more: false,
-            }))?;
-            backend.validate_view(view)?;
-            channel.send(&bytes).await?;
-            return Ok(());
-        }
-        tokio::task::yield_now().await;
+        Ok(mesh_replication::session::HavePage {
+            ids: page.items,
+            next: page.next,
+        })
+    }
+
+    fn validate(&self) -> Result<(), SessionError> {
+        Ok(self.backend.validate_view(self.view)?)
     }
 }
 
@@ -764,19 +843,20 @@ pub(super) async fn intersection_count<B: SessionBackend>(
     backend: &B,
     view: &B::View,
     peer: &HashSet<EventId>,
+    limited: bool,
 ) -> Result<usize, SessionError> {
+    use mesh_replication::session::HaveSource;
+
+    let mut source = SessionHaveSource {
+        backend,
+        view,
+        scan_budget: limited.then_some((8, 2000)),
+    };
     let mut cursor = None;
     let mut count = 0usize;
     loop {
-        let page = backend.have_page(
-            view,
-            cursor.as_ref(),
-            IdPageBudget {
-                ids: HAVE_IDS_PER_CHUNK,
-                examined: HAVE_IDS_PER_CHUNK,
-            },
-        )?;
-        count += page.items.iter().filter(|id| peer.contains(id)).count();
+        let page = source.page(cursor.as_ref(), HAVE_IDS_PER_CHUNK, HAVE_IDS_PER_CHUNK)?;
+        count += page.ids.iter().filter(|id| peer.contains(id)).count();
         cursor = page.next;
         if cursor.is_none() {
             return Ok(count);
@@ -784,26 +864,74 @@ pub(super) async fn intersection_count<B: SessionBackend>(
         tokio::task::yield_now().await;
     }
 }
-// Largest common event payload fits Response (52-byte empty envelope) and
-// Followup (44 bytes). Compute framing through the unchanged codec, not guesses.
-fn event_frame_budget(conversation: ConversationId) -> Result<usize, SessionError> {
-    let overhead = encode(&SyncWire::Response(SyncResponse {
-        conversation,
-        events: vec![],
-        have: vec![],
-    }))?
-    .len();
-    Ok(MAX_PLAINTEXT - overhead)
+struct SessionExportSource<'a, B: SessionBackend> {
+    backend: &'a B,
+    view: &'a B::View,
+    have: &'a HashSet<EventId>,
+    max_frames: usize,
 }
-pub(super) async fn select_export_frames<B: SessionBackend>(
+
+impl<B: SessionBackend> mesh_replication::session::ExportSource for SessionExportSource<'_, B> {
+    type Event = Event;
+    type Cursor = B::ExportCursor;
+    type Error = LogError;
+
+    fn page(
+        &mut self,
+        cursor: &mut Option<Self::Cursor>,
+        space: mesh_replication::session::PageSpace,
+    ) -> mesh_replication::session::ExportResult<Event, Self::Cursor, LogError> {
+        use mesh_replication::session::{EventPage, ExportError};
+
+        let budget = ExportPageBudget {
+            examined: space.examined,
+            events: space.events,
+            encoded_bytes: space.encoded_bytes,
+            allocated_bytes: space.allocated_bytes,
+        };
+        let batch = self
+            .backend
+            .export_page(self.view, self.have, cursor, budget, self.max_frames)
+            .map_err(|error| match error {
+                LogError::PageBudgetTooSmall { .. } => ExportError::PageTooSmall(error),
+                _ => ExportError::Source(error),
+            })?;
+        let page = batch.page;
+        Ok(EventPage {
+            events: page.events,
+            next: page.next,
+            encoded_bytes: page.encoded_bytes,
+            allocated_bytes: page.allocated_bytes,
+            frame_finished: batch.frame_finished,
+        })
+    }
+}
+
+pub(super) async fn prepare_outgoing_selection<B: SessionBackend>(
     backend: &B,
     view: &B::View,
-    conversation: ConversationId,
     have: &HashSet<EventId>,
-    max_frames: usize,
-) -> Result<Vec<SyncFollowup>, SessionError> {
+) -> Result<(), SessionError> {
+    prepare_outgoing(backend, view, have, None).await
+}
+
+async fn prepare_outgoing<B: SessionBackend>(
+    backend: &B,
+    view: &B::View,
+    have: &HashSet<EventId>,
+    mut steps: Option<usize>,
+) -> Result<(), SessionError> {
+    let mut charge = || match &mut steps {
+        Some(0) => Err(SessionError::ResourceUnavailable),
+        Some(remaining) => {
+            *remaining -= 1;
+            Ok(())
+        }
+        None => Ok(()),
+    };
     if !backend.reusable_export(view, have)? {
         loop {
+            charge()?;
             if backend
                 .reset_export_step(view, PreparationBudget::default())?
                 .ready
@@ -827,6 +955,7 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             }
         }
         loop {
+            charge()?;
             if backend
                 .prepare_export_step(view, have, PreparationBudget::default())?
                 .ready
@@ -836,82 +965,310 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             tokio::task::yield_now().await;
         }
     }
-    let frame_budget = event_frame_budget(conversation)?;
-    let mut frames = Vec::new();
-    let mut cursor = None;
-    let mut frame = Vec::new();
-    let mut encoded = 0;
-    let mut allocated = 0;
-    loop {
-        let budget = ExportPageBudget {
-            examined: 512,
-            events: 512 - frame.len(),
-            encoded_bytes: frame_budget - encoded,
-            allocated_bytes: 4 * 1024 * 1024 - allocated,
-        };
-        if budget.events == 0 || budget.encoded_bytes == 0 || budget.allocated_bytes == 0 {
-            frames.push(SyncFollowup {
-                conversation,
-                events: std::mem::take(&mut frame),
-            });
-            encoded = 0;
-            allocated = 0;
-            if frames.len() == max_frames {
-                return Ok(frames);
+    Ok(())
+}
+
+pub(super) async fn select_export_batches<B: SessionBackend>(
+    backend: &B,
+    view: &B::View,
+    have: &HashSet<EventId>,
+    max_frames: usize,
+    encoded_per_frame: usize,
+) -> Result<Vec<Vec<Event>>, SessionError> {
+    select_export(backend, view, have, max_frames, encoded_per_frame, None).await
+}
+
+async fn select_export<B: SessionBackend>(
+    backend: &B,
+    view: &B::View,
+    have: &HashSet<EventId>,
+    max_frames: usize,
+    encoded_per_frame: usize,
+    budget: Option<SyncTurnBudget>,
+) -> Result<Vec<Vec<Event>>, SessionError> {
+    use mesh_replication::session::{ExportError, ExportLimits};
+
+    let (records, bytes) = budget.map_or((512, encoded_per_frame), |limit| {
+        (
+            limit.records.min(512),
+            limit.body_bytes.min(encoded_per_frame),
+        )
+    });
+    if records == 0 || bytes == 0 {
+        return Err(SessionError::ResourceUnavailable);
+    }
+    prepare_outgoing(backend, view, have, budget.map(|_| 4)).await?;
+
+    let limits = ExportLimits {
+        frames: max_frames,
+        examined: 512,
+        events_per_frame: records,
+        encoded_per_frame: bytes,
+        allocated_per_frame: 4 * 1024 * 1024,
+    };
+    mesh_replication::session::select_export_frames(
+        &mut SessionExportSource {
+            backend,
+            view,
+            have,
+            max_frames,
+        },
+        limits,
+        tokio::task::yield_now,
+    )
+    .await
+    .map_err(|error| match error {
+        ExportError::Source(error) | ExportError::PageTooSmall(error) => SessionError::from(error),
+        ExportError::Limit => SessionError::UnexpectedMessage,
+    })
+}
+
+pub(super) struct RoundStoreAdapter<'a, B>(pub &'a B, pub(super) Option<&'a Mutex<SyncTurnBudget>>);
+
+impl<B: SessionBackend> legacy_round::RoundBackend<SessionError> for RoundStoreAdapter<'_, B> {
+    type Peer = ReconciliationPeer;
+    type View = B::View;
+    type RemoteHave = have_budget::ReceivedHave;
+
+    fn bind_session_peer(&self, peer: &Self::Peer) {
+        self.0.bind_session_peer(peer);
+    }
+
+    async fn prepared_probe(
+        &self,
+        scope: &ConversationId,
+    ) -> Result<legacy_round::Probe<Self::View>, SessionError> {
+        if self.1.is_some() {
+            bounded_probe(self.0, scope).await
+        } else {
+            prepared_probe(self.0, scope).await
+        }
+    }
+
+    async fn open_prepared_view(&self, scope: &ConversationId) -> Result<Self::View, SessionError> {
+        if self.1.is_some() {
+            bounded_view(self.0, scope).await
+        } else {
+            open_prepared_view(self.0, scope).await
+        }
+    }
+
+    fn advertised_count(&self, view: &Self::View) -> Result<usize, SessionError> {
+        have_count(self.0.advertised_count(view)?)
+    }
+
+    fn have_count(&self, count: u64) -> Result<usize, SessionError> {
+        have_count(count)
+    }
+
+    fn validate_view(&self, view: &Self::View) -> Result<(), SessionError> {
+        Ok(self.0.validate_view(view)?)
+    }
+
+    fn reusable_view(&self, view: &Self::View) -> Result<bool, SessionError> {
+        Ok(self.0.reusable_view(view)?)
+    }
+
+    fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, SessionError> {
+        Ok(self.0.retain_custody_view(view)?)
+    }
+
+    fn quiet_comparison(
+        &self,
+        scope: &ConversationId,
+    ) -> Result<Option<legacy_round::QuietComparison>, SessionError> {
+        Ok(self.0.quiet_comparison(scope)?)
+    }
+
+    fn validate_quiet_comparison(
+        &self,
+        scope: &ConversationId,
+        hint: legacy_round::QuietComparison,
+    ) -> Result<bool, SessionError> {
+        Ok(self.0.validate_quiet_comparison(scope, hint)?)
+    }
+
+    fn quiet_comparison_token(&self, view: &Self::View) -> Result<Option<[u8; 32]>, SessionError> {
+        Ok(self.0.quiet_comparison_token(view)?)
+    }
+
+    fn retain_quiet_comparison(
+        &self,
+        view: &Self::View,
+        hint: legacy_round::QuietComparison,
+    ) -> Result<(), SessionError> {
+        Ok(self.0.retain_quiet_comparison(view, hint)?)
+    }
+
+    type HaveReservation = Option<tokio::sync::OwnedSemaphorePermit>;
+    type HaveCursor = B::HaveCursor;
+
+    fn have_limits(&self) -> HaveLimits {
+        if self.1.is_some() {
+            HaveLimits {
+                ids_per_frame: HAVE_IDS_PER_CHUNK,
+                frames: 8,
+                total_ids: 2000,
             }
+        } else {
+            HAVE_LIMITS
         }
-        let budget = ExportPageBudget {
-            examined: 512,
-            events: 512 - frame.len(),
-            encoded_bytes: frame_budget - encoded,
-            allocated_bytes: 4 * 1024 * 1024 - allocated,
-        };
-        // Borrowed page cursors are required externally. Preserve the cursor
-        // on a budget boundary so the next frame retries the first unselected row.
-        // SQL leaves the borrowed cursor intact when the next event needs a new frame.
-        let result = backend.export_page(view, have, &mut cursor, budget, max_frames);
-        let batch = match result {
-            Ok(batch) => batch,
-            Err(LogError::PageBudgetTooSmall { .. }) if !frame.is_empty() => {
-                frames.push(SyncFollowup {
-                    conversation,
-                    events: std::mem::take(&mut frame),
-                });
-                encoded = 0;
-                allocated = 0;
-                if frames.len() == max_frames {
-                    return Ok(frames);
-                }
-                tokio::task::yield_now().await;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let page = batch.page;
-        cursor = page.next;
-        encoded += page.encoded_bytes;
-        allocated += page.allocated_bytes;
-        frame.extend(page.events);
-        if encoded > frame_budget && !batch.frame_finished {
-            return Err(SessionError::UnexpectedMessage);
+    }
+
+    fn have_source<'a>(
+        &'a self,
+        view: &'a Self::View,
+    ) -> impl mesh_replication::session::HaveSource<
+        Id = EventId,
+        Cursor = Self::HaveCursor,
+        Error = SessionError,
+    > + 'a {
+        SessionHaveSource {
+            backend: self.0,
+            view,
+            scan_budget: self.1.map(|_| (8, 2000)),
         }
-        let eof = cursor.is_none();
-        // Accumulate bounded scan pages until the frame fills or reaches EOF.
-        // Empty continuation pages release the lock and yield as well.
-        if !frame.is_empty() && (batch.frame_finished || eof) {
-            frames.push(SyncFollowup {
-                conversation,
-                events: std::mem::take(&mut frame),
-            });
-            encoded = 0;
-            allocated = 0;
-            if frames.len() == max_frames {
-                return Ok(frames);
-            }
+    }
+
+    fn reserve_remote_have(&self) -> Result<Self::HaveReservation, SessionError> {
+        self.0
+            .remote_have_budget()
+            .map(RemoteHaveBudget::try_admit)
+            .transpose()
+    }
+
+    fn collect_remote_have(
+        &self,
+        ids: Vec<EventId>,
+        permit: Self::HaveReservation,
+        compare: bool,
+    ) -> Result<Self::RemoteHave, SessionError> {
+        if compare {
+            have_budget::ReceivedHave::from_vec_for_comparison(ids, permit, true)
+        } else {
+            have_budget::ReceivedHave::from_vec(ids, permit)
         }
-        if eof {
-            return Ok(frames);
-        }
+    }
+
+    fn have_error(&self, error: HaveError<SessionError>) -> SessionError {
+        error.into()
+    }
+
+    async fn yield_inventory_work(&self) {
         tokio::task::yield_now().await;
+    }
+
+    async fn intersection_count(
+        &self,
+        view: &Self::View,
+        have: &Self::RemoteHave,
+    ) -> Result<usize, SessionError> {
+        intersection_count(self.0, view, have, self.1.is_some()).await
+    }
+
+    fn comparison_fingerprint(&self, remote: &Self::RemoteHave) -> Option<[u8; 32]> {
+        remote.comparison_fingerprint()
+    }
+
+    fn apply(&self, events: &[Event]) -> Result<ApplyReport, SessionError> {
+        if let Some(budget) = self.1 {
+            budget
+                .lock()
+                .expect("turn budget lock")
+                .charge_events(events)?;
+        }
+        Ok(self.0.apply(events)?)
+    }
+
+    fn admission_denied(&self) -> bool {
+        self.0.admission_denied()
+    }
+
+    async fn select_export_batches(
+        &self,
+        view: &Self::View,
+        remote: &Self::RemoteHave,
+        frames: usize,
+        encoded_per_frame: usize,
+    ) -> Result<Vec<Vec<Event>>, SessionError> {
+        let Some(budget) = self.1 else {
+            return select_export_batches(self.0, view, remote, frames, encoded_per_frame).await;
+        };
+        let remaining = *budget.lock().expect("turn budget lock");
+        let batches = select_export(
+            self.0,
+            view,
+            remote,
+            frames,
+            encoded_per_frame,
+            Some(remaining),
+        )
+        .await?;
+        let mut budget = budget.lock().expect("turn budget lock");
+        let mut next = *budget;
+        for batch in &batches {
+            next.charge_events(batch)?;
+        }
+        *budget = next;
+        Ok(batches)
+    }
+}
+impl<B: SessionBackend> legacy_round::ResponderBackend<SessionError> for RoundStoreAdapter<'_, B> {
+    fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, SessionError> {
+        Ok(self.0.metadata(view)?)
+    }
+
+    fn durable_have_in_view(
+        &self,
+        view: &Self::View,
+        scope: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, SessionError> {
+        Ok(self.0.durable_have_in_view(view, scope, id)?)
+    }
+
+    fn file_message_identity(
+        &self,
+        file: &ConversationId,
+        id: &EventId,
+    ) -> Result<Option<Event>, SessionError> {
+        Ok(self.0.file_message_identity(file, id)?)
+    }
+
+    fn accept_file_message_identity(&self, event: Event) -> Result<bool, SessionError> {
+        Ok(self.0.accept_file_message_identity(event)?)
+    }
+
+    fn sticker_file_proof(
+        &self,
+        file: &ConversationId,
+        id: &EventId,
+    ) -> Result<Option<Vec<Event>>, SessionError> {
+        Ok(self.0.sticker_file_proof(file, id)?)
+    }
+
+    fn sticker_file_consent(
+        &self,
+        file: &ConversationId,
+        id: &EventId,
+        headers: Vec<Event>,
+    ) -> Result<Option<Event>, SessionError> {
+        Ok(self.0.sticker_file_consent(file, id, headers)?)
+    }
+
+    fn signed_file_consent(
+        &self,
+        file: &ConversationId,
+        id: &EventId,
+    ) -> Result<Option<Event>, SessionError> {
+        Ok(self.0.signed_file_consent(file, id)?)
+    }
+
+    fn file_consent(
+        &self,
+        file: &ConversationId,
+        id: &EventId,
+    ) -> Result<FileConsentStatus, SessionError> {
+        Ok(self.0.file_consent(file, id)?)
     }
 }

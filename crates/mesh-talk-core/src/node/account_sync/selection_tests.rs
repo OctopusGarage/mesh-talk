@@ -1886,6 +1886,7 @@ fn pairing_export_stops_at_record_budget_before_building_the_remaining_archive()
 
 #[tokio::test]
 async fn account_history_worker_drains_continuation_without_waiting_retry_interval() {
+    use crate::transport::diagnostics;
     use tokio::net::TcpListener;
     let (_dir, source, receiver) = sibling_nodes();
     for index in 0..40 {
@@ -1935,12 +1936,19 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
     // Replace only the original startup tick with one retained initial demand.
     // Disable periodic repair so it cannot rescue a lost continuation even if
     // the cold first page finishes just before the next ten-second tick.
+    // Run the explicit sample alone because the app counters are process-wide.
+    let observation =
+        std::env::var_os("MESH_REQ018_MEASURE_CATCH_UP").map(|_| diagnostics::begin());
+    let started = std::time::Instant::now();
     receiver.account_sync_notify.notify_one();
     let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
     // Bound the complete real transfer separately from every continuation gap.
     // No subsequent synthetic wake or explicit preparation turn is injected.
     let outcome = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
+            if let Some(ticket) = observation {
+                assert!(diagnostics::sample(ticket).is_some());
+            }
             if receiver
                 .account_history(&receiver.account_id(), 100)
                 .unwrap()
@@ -1953,6 +1961,12 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
         }
     })
     .await;
+    let elapsed = started.elapsed();
+    let transport = observation.map(|ticket| {
+        let snapshot = diagnostics::sample(ticket);
+        diagnostics::stop(ticket);
+        snapshot.expect("isolated catch-up observation must stay active")
+    });
     *receiver.account_client_test_hook.lock().unwrap() = None;
     worker.abort();
     server.abort();
@@ -1960,6 +1974,17 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
     let _ = server.await;
     outcome.expect("all forty real history messages must finish within the fixture bound");
     let timing = continuation.lock().unwrap();
+    if let Some(transport) = transport {
+        assert!(transport.sent_frame_bytes > 0);
+        assert!(transport.received_frame_bytes > 0);
+        eprintln!(
+            "catch_up messages=40 elapsed_ms={} encrypted_frame_bytes={} continuations={} longest_gap_ms={}",
+            elapsed.as_millis(),
+            transport.sent_frame_bytes,
+            timing.continued_requests,
+            timing.longest_gap.as_millis()
+        );
+    }
     assert!(
         timing.continued_requests > 0,
         "a completed page must dispatch its retained continuation"
@@ -7008,7 +7033,7 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
             // releasing its predecessor's terminal result. The old active task
             // retains this peer's attachment slot until that release.
             while handoff_generation.load(Ordering::SeqCst) <= original_generation
-                || !source_status().is_some_and(|status| status.pending_attachments == 1)
+                || source_status().is_none_or(|status| status.pending_attachments != 1)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

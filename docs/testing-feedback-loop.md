@@ -232,7 +232,7 @@ Windows uses the same `windows-latest` runner as the full suite; Chromium contex
 settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
-Linux, eight macOS and four Windows runners. Linux coverage depends on its own shards
+Linux, sixteen macOS and four Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
@@ -417,6 +417,31 @@ judges a change low risk. Preserve the distinction between local acceptance,
 recipient delivery and read state, and between frontend ownership and host
 session authority. Summarize observed results and remaining obligations before
 moving to candidate acceptance.
+
+## Verification coverage and gaps
+
+Use this map with the owning capability contract when selecting evidence. A
+listed workflow describes an existing verification mechanism. Its result must
+still be checked for the exact source, platform and scenario under review.
+
+| Method                                       | Existing owner and evidence                                                                                                                                                                                                           | Coverage limit or selection rule                                                                                                                                                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Static and maintainability                   | [Affected validation](#change-aware-development-plans) covers syntax, formatting, types and applicable lints. [Change review](quality-gates.md#change-review) covers ownership, complexity and duplication.                           | Select security analysis separately. Review semantic invariants at their owning boundary.                                                                                                                                      |
+| Unit, integration, contract and E2E          | [Local feedback](#validation-stages-and-agent-responsibilities), [backend E2E](../.github/workflows/e2e-backend.yml), [UI E2E](../.github/workflows/e2e-ui.yml) and [native evidence](#native-requirements-and-publication-evidence). | Include authorization, compatibility and failure paths. Browser mocks cover the renderer contract. Native and network guarantees need evidence at those boundaries.                                                            |
+| Generative tests and assertion effectiveness | [Fuzz workflow](../.github/workflows/fuzz.yml) covers selected decoders. [Mutation policy](quality-gates.md#test-quality-and-evidence) distinguishes runner qualification from scheduled workspace sampling.                          | Add property-based generators when a named invariant benefits from exploring inputs beyond fixtures. Mutation results apply to the selected mutations and assertions.                                                          |
+| Runtime and dynamic security                 | Runtime fences and the owning authorization and recovery tests exercise scoped IPC, peer admission and durable effects.                                                                                                               | Broad DAST is deferred. Use a scoped, authorized test when a concrete running interface and risk warrant one.                                                                                                                  |
+| Performance and stability                    | [Performance requirements](performance-requirements.md) and [resource benchmark](evals/README.md#linux-headless-idle-resource-benchmark) cover bounded resource use and regression evidence.                                          | Select load, stress, spike, soak and capacity windows to fit the feature. Short idle and CI smoke samples leave sustained load and physical-network limits open.                                                               |
+| Memory and concurrency                       | [Sanitizers](../.github/workflows/sanitizers.yml), cancellation and process-retirement controls, and native resource samples.                                                                                                         | Sanitizer coverage depends on the selected platform and code. Data-race and undefined-behavior instrumentation need a supported target and an explicit risk.                                                                   |
+| Coverage                                     | [CI coverage ownership](#ci-ownership-and-browser-sharding) and the [quality gates](quality-gates.md#test-quality-and-evidence) define the collected scope.                                                                           | Inspect assertions as well as coverage. Condition, path and MC/DC are deferred unless a specific obligation or high-risk decision requires them.                                                                               |
+| Security, dependencies and compliance        | [CodeQL](../.github/workflows/codeql.yml), [dependency review](../.github/workflows/dependency-review.yml), [Gitleaks](../.github/workflows/gitleaks.yml) and the owning health and release checks.                                   | License and dependency checks cover their declared policies. Assess privacy obligations with the affected data owner. Apply regulated standards only when applicable.                                                          |
+| Reliability, compatibility and release       | [Recovery and retirement evidence](#completion-and-retirement-evidence), native scenario requirements and [release gates](quality-gates.md#release-workflow).                                                                         | Choose controlled failure, interruption, reconnect, restart, install, upgrade and recovery checks by boundary. Use exploratory testing for unmodeled workflows. Reserve wider chaos experiments for explicit fault hypotheses. |
+| Formal verification                          | Documented invariants and executable behavioral controls are the current evidence.                                                                                                                                                    | A formal model is deferred until a costly protocol or state-machine ambiguity warrants it. Establish correspondence to production transitions before relying on the proof.                                                     |
+| AI and agent behavior                        | [Eval registry](evals/README.md) and [AI Eval workflow](../.github/workflows/ai-eval.yml).                                                                                                                                            | Cover instructions, tools, authorization and completion where those surfaces exist. Report model-backed and deterministic coverage separately. RAG-specific checks apply only to a retrieval surface.                          |
+
+When a requirement changes, update the [maintenance loop](#maintaining-standards-across-requirements)
+and the affected capability contract together. Record the method, boundary,
+purpose, scenario and source-bound result in the existing feedback or PR
+evidence. Record gaps with the owning guide and trigger for additional evidence.
 
 ## Maintaining standards across requirements
 
@@ -1492,7 +1517,7 @@ WebKit core and extended inventories use parallel producers and retain the stabl
 The existing portable evidence owner validates every source/run/attempt-bound
 partition and the complete scenario inventory; missing producers do not pass.
 
-Full Chromium tests use eight Playwright shards on macOS and four each on Linux
+Full Chromium tests use sixteen Playwright shards on macOS and four each on Linux
 and Windows, with one worker and zero retries per runner. Desktop admission allows
 four concurrent shards per OS after Health and WebKit; Linux starts independently.
 The platform-specific inventory owner rejects incomplete or mismatched layouts.
@@ -2441,6 +2466,11 @@ to be stopped.
   Intel macOS and Windows GNU, plus the arm64 `network-acceptance` example.
   Exercise preferred-relay outage, a surviving three-relay route, consented file
   delivery with sender restart and SHA-256, and bridge partition/recovery.
+  The fixture isolates discovery ports, so refresh the local ingress relay
+  hints with routed discovery before awaiting the attachment receipt, before
+  stopping the inter-site bridge and during its 125-second partition. Verify
+  both ingress relays remain discovered before queueing the partitioned message
+  and before restoring the bridge.
 - `frontend/e2e/call-media-physical.spec.ts`: build the `network-acceptance`
   example for native macOS and Windows GNU, then run
   `MESH_TALK_PHYSICAL_MEDIA=1 npx playwright test e2e/call-media-physical.spec.ts`

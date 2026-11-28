@@ -29,6 +29,8 @@ pub struct PeerEndpoint {
     pub source: RouteSource,
     pub last_seen: Instant,
     pub last_authenticated: Option<Instant>,
+    /// Round trip of a nonce-bound signed discovery reply at last_seen.
+    pub routed_rtt: Option<Duration>,
     /// Public observation deadline for authenticated/directory evidence, never a route lease.
     pub presence_expires_at: Option<Instant>,
     /// Original directory expiry in Unix seconds, retained across repeated old-relay evidence.
@@ -638,6 +640,7 @@ impl Roster {
                 .find(|r| r.source == RouteSource::RoutedQuery && r.addr.ip() == source_ip)
         {
             route.presence_expires_at = Some(route.last_seen + lease);
+            route.routed_rtt = Some(rtt);
         }
         outcome
     }
@@ -707,6 +710,7 @@ impl Roster {
             source: RouteSource::PostOffice,
             last_seen: now,
             last_authenticated: None,
+            routed_rtt: None,
             presence_expires_at: prior_expiry,
             presence_origin_expires_at: prior_origin,
             origin_hops: prior_hops,
@@ -905,6 +909,7 @@ impl Roster {
             source,
             last_seen: now,
             last_authenticated: previous_auth,
+            routed_rtt: None,
             presence_expires_at: (source == RouteSource::Authenticated)
                 .then_some(now + PUBLIC_PRESENCE_TTL),
             presence_origin_expires_at: None,
@@ -979,6 +984,7 @@ impl Roster {
                 source: RouteSource::Authenticated,
                 last_seen: now,
                 last_authenticated: Some(now),
+                routed_rtt: None,
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
                 origin_hops: None,
@@ -1017,7 +1023,11 @@ impl Roster {
     }
 
     pub fn peers(&self) -> Vec<PeerRecord> {
-        self.peers.values().cloned().collect()
+        self.peer_records().cloned().collect()
+    }
+
+    pub(super) fn peer_records(&self) -> impl Iterator<Item = &PeerRecord> {
+        self.peers.values()
     }
 
     /// The known peers that advertise the post-office role.
@@ -1616,6 +1626,7 @@ mod routed_tests {
         roster.update_routed_with_latency(&proof, ip, "self", Duration::from_millis(500));
         let peer = roster.get(&proof.user_id).unwrap();
         let route = &peer.routes[0];
+        assert_eq!(route.routed_rtt, Some(Duration::from_millis(500)));
         assert_eq!(
             route.presence_expires_at.unwrap() - route.last_seen,
             Duration::from_secs(60)

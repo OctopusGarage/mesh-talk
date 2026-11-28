@@ -159,6 +159,33 @@ it("establishes expanded coverage without unread archive, then discovers changed
   expect(store.getState().historyRevision).toBe(2);
 });
 
+it("skips unchanged durable history and reconciles a new import revision", async () => {
+  const store = session();
+  store.setState({ historyRevision: 1 });
+  const scan = (revision: number) =>
+    scanConversationHistory(
+      store.setState,
+      store.getState,
+      [conversation],
+      revision,
+      () => true,
+      true,
+    );
+
+  await scan(1);
+  expect(historyBundleReads()).toEqual([]);
+  expect(store.getState().historyScanQueue).toEqual([]);
+
+  await scan(2);
+  expect(historyBundleReads()).toEqual([
+    [
+      "owner_account_history",
+      expect.objectContaining({ account: "friend", limit: 500 }),
+    ],
+  ]);
+  expect(store.getState().historyRevision).toBe(2);
+});
+
 it("rotates failed snapshots behind later work and only advances a completed revision", async () => {
   const store = session();
   const conversations = Array.from(

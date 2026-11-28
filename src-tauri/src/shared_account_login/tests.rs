@@ -647,6 +647,24 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
                 .unwrap();
         }
     }
+    // Exercise mandatory policy propagation through real loopback pairing and
+    // the desktop installer, including exclusion of device-local history.
+    let manager = source.app.auth_service().identity_manager();
+    let mut security = manager
+        .export_account_security("Federer", "source-password")
+        .unwrap();
+    security.generation = 1;
+    security.totp = Some(mesh_talk_core::identity::account_security::TotpEnrollment {
+        secret: [7; 20],
+        recovery_hashes: vec![[8; 32]],
+    });
+    security.consumed_recovery.push([8; 32]);
+    security.last_step = Some(123);
+    security.failures = 3;
+    security.blocked_until = 9999999999;
+    manager
+        .import_account_security("Federer", "source-password", 0, security)
+        .unwrap();
     initialize(&source).await;
     let previous_snapshot = initialize(&target).await;
     let before = target.app.session().get().unwrap();
@@ -818,6 +836,19 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
     drop(guard);
     drop(source_guard);
     target.stop().await;
+    let info = target.app.session().get().unwrap();
+    let received = target
+        .app
+        .auth_service()
+        .identity_manager()
+        .export_account_security(&info.user.name, &info.password)
+        .unwrap();
+    assert_eq!(received.generation, 1);
+    assert_eq!(received.totp.unwrap().secret, [7; 20]);
+    assert!(received.consumed_recovery.is_empty());
+    assert_eq!(received.last_step, None);
+    assert_eq!(received.failures, 0);
+    assert_eq!(received.blocked_until, 0);
     source.stop().await;
 }
 
@@ -1325,6 +1356,318 @@ async fn explicit_joiner_category_choices_override_source_full_sync_default() {
         chosen,
         "mandatory shared login must not override the joining user's explicit category consent"
     );
+    drop(guard);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn actual_totp_begin_preparation_does_not_block_logout_or_release_stale_secrets() {
+    let fixture = Fixture::new("totp-stalled-begin", "private-password").await;
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let owner = fixture.admission.lease().owner().to_owned();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    crate::account_security::PREPARATION_PAUSES
+        .lock()
+        .unwrap()
+        .insert(owner.clone(), (entered, resume));
+    let app = fixture.app.clone();
+    let node = fixture.node.clone();
+    let task = tokio::spawn(crate::account_security::mutate(
+        owner, None, None, 0, app, node,
+    ));
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .unwrap();
+    let session = fixture.app.session().clone();
+    let logout = tokio::task::spawn_blocking(move || session.clear());
+    let progressed = tokio::time::timeout(Duration::from_secs(2), logout).await;
+    release.send(()).unwrap();
+    assert!(
+        task.await.unwrap().is_err(),
+        "stale begin must not return seed or recovery codes"
+    );
+    assert!(
+        progressed.is_ok(),
+        "logout must complete while preparation is stalled"
+    );
+    assert!(fixture.app.totp_pending.lock().unwrap().is_none());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn actual_totp_disable_preparation_rejects_logout_without_consuming_recovery() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new("totp-stalled-disable", "private-password").await;
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let manager = fixture.app.auth_service().identity_manager();
+    let mut security = manager
+        .export_account_security("totp-stalled-disable", "private-password")
+        .unwrap();
+    security.generation = 1;
+    security.totp = Some(mesh_talk_core::identity::account_security::TotpEnrollment {
+        secret: [7; 20],
+        recovery_hashes: vec![Sha256::digest(b"recovery-proof").into()],
+    });
+    manager
+        .import_account_security("totp-stalled-disable", "private-password", 0, security)
+        .unwrap();
+    let owner = fixture.admission.lease().owner().to_owned();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    crate::account_security::PREPARATION_PAUSES
+        .lock()
+        .unwrap()
+        .insert(owner.clone(), (entered, resume));
+    let task = tokio::spawn(crate::account_security::mutate(
+        owner,
+        None,
+        Some("recovery-proof".into()),
+        2,
+        fixture.app.clone(),
+        fixture.node.clone(),
+    ));
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .unwrap();
+    let session = fixture.app.session().clone();
+    let progressed = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || session.clear()),
+    )
+    .await;
+    release.send(()).unwrap();
+    assert!(task.await.unwrap().is_err());
+    assert!(progressed.is_ok());
+    let state = manager
+        .export_account_security("totp-stalled-disable", "private-password")
+        .unwrap();
+    assert_eq!(state.generation, 1);
+    assert!(state.totp.is_some());
+    assert!(state.consumed_recovery.is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn actual_totp_confirm_preparation_cannot_commit_after_logout() {
+    let fixture = Fixture::new("totp-stalled-confirm", "private-password").await;
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let owner = fixture.admission.lease().owner().to_owned();
+    crate::account_security::mutate(
+        owner.clone(),
+        None,
+        None,
+        0,
+        fixture.app.clone(),
+        fixture.node.clone(),
+    )
+    .await
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let code = {
+        let pending = fixture.app.totp_pending.lock().unwrap();
+        let secret = pending.as_ref().unwrap().enrollment.secret.as_ref();
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret);
+        let tag = ring::hmac::sign(&key, &(now / 30).to_be_bytes());
+        let bytes = tag.as_ref();
+        let offset = (bytes[19] & 15) as usize;
+        let value = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) & 0x7fff_ffff;
+        format!("{:06}", value % 1_000_000)
+    };
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    crate::account_security::PREPARATION_PAUSES
+        .lock()
+        .unwrap()
+        .insert(owner.clone(), (entered, resume));
+    let task = tokio::spawn(crate::account_security::mutate(
+        owner,
+        None,
+        Some(code),
+        1,
+        fixture.app.clone(),
+        fixture.node.clone(),
+    ));
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .unwrap();
+    let session = fixture.app.session().clone();
+    let progressed = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || session.clear()),
+    )
+    .await;
+    release.send(()).unwrap();
+    assert!(task.await.unwrap().is_err());
+    assert!(progressed.is_ok());
+    let state = fixture
+        .app
+        .auth_service()
+        .identity_manager()
+        .export_account_security("totp-stalled-confirm", "private-password")
+        .unwrap();
+    assert_eq!(state.generation, 0);
+    assert!(state.totp.is_none());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn totp_retry_unknown_published_policy_reports_pending_without_replacement() {
+    let fixture = Fixture::new("totp-unknown-source", "private-password").await;
+    let guard = fixture.node.0.read().await;
+    let runtime = guard.as_ref().unwrap();
+    let snapshot = runtime
+        .handle()
+        .publish_account_access_if(
+            serde_json::to_vec(&serde_json::json!({
+                "version":1, "login_name":"totp-unknown-source", "password":"private-password",
+                "security":{"version":255,"generation":1,"totp":null}
+            }))
+            .unwrap(),
+            |commit| commit(),
+        )
+        .unwrap();
+    drop(guard);
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let result = crate::account_security::mutate(
+        fixture.admission.lease().owner().into(),
+        None,
+        None,
+        4,
+        fixture.app.clone(),
+        fixture.node.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["sync_pending"], true);
+    let guard = fixture.node.0.read().await;
+    assert_eq!(
+        guard
+            .as_ref()
+            .unwrap()
+            .handle()
+            .account_access_snapshot()
+            .unwrap()
+            .revision(),
+        snapshot.revision()
+    );
+    drop(guard);
+    assert!(
+        fixture
+            .app
+            .auth_service()
+            .identity_manager()
+            .export_account_security("totp-unknown-source", "private-password")
+            .unwrap()
+            .totp
+            .is_none()
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn actual_totp_begin_preparation_does_not_block_app_lock_or_release_stale_secrets() {
+    let fixture = Fixture::new("totp-stalled-lock", "private-password").await;
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let owner = fixture.admission.lease().owner().to_owned();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    crate::account_security::PREPARATION_PAUSES
+        .lock()
+        .unwrap()
+        .insert(owner.clone(), (entered, resume));
+    let app = fixture.app.clone();
+    let node = fixture.node.clone();
+    let task = tokio::spawn(crate::account_security::mutate(
+        owner, None, None, 0, app, node,
+    ));
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .unwrap();
+    let app = fixture.app.clone();
+    let lock = tokio::task::spawn_blocking(move || {
+        use tauri::Manager;
+        let host = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        host.manage(app.app_lock().clone());
+        host.manage(app);
+        crate::app_lock::lock_app(host.state(), host.state()).unwrap();
+    });
+    let progressed = tokio::time::timeout(Duration::from_secs(2), lock).await;
+    release.send(()).unwrap();
+    assert!(
+        task.await.unwrap().is_err(),
+        "stale begin must not return seed or recovery codes"
+    );
+    assert!(
+        progressed.is_ok(),
+        "app lock must complete while preparation is stalled"
+    );
+    assert!(fixture.app.totp_pending.lock().unwrap().is_none());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn totp_equal_generation_conflicting_signed_policy_preserves_local_state() {
+    let fixture = Fixture::new("totp-conflict", "private-password").await;
+    let manager = fixture.app.auth_service().identity_manager();
+    let mut local = manager
+        .export_account_security("totp-conflict", "private-password")
+        .unwrap();
+    local.generation = 1;
+    local.totp = Some(mesh_talk_core::identity::account_security::TotpEnrollment {
+        secret: [7; 20],
+        recovery_hashes: vec![],
+    });
+    manager
+        .import_account_security("totp-conflict", "private-password", 0, local)
+        .unwrap();
+    let before = serde_json::to_vec(
+        &manager
+            .export_account_security("totp-conflict", "private-password")
+            .unwrap(),
+    )
+    .unwrap();
+    let session = fixture.app.session().get().unwrap();
+    let guard = fixture.node.0.read().await;
+    let runtime = guard.as_ref().unwrap();
+    let payload = serde_json::json!({
+        "version":1, "login_name":"totp-conflict", "password":"private-password",
+        "security":{"version":1,"generation":1,"totp":{"secret":vec![8;20],"recovery_hashes":[]}}
+    });
+    let snapshot = runtime
+        .handle()
+        .publish_account_access_if(serde_json::to_vec(&payload).unwrap(), |commit| commit())
+        .unwrap();
+    assert!(
+        install(
+            fixture.root.path(),
+            &fixture.app,
+            &fixture.admission,
+            runtime,
+            &snapshot
+        )
+        .is_err()
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &manager
+                .export_account_security("totp-conflict", "private-password")
+                .unwrap()
+        )
+        .unwrap(),
+        before
+    );
+    assert_eq!(fixture.app.session().get().unwrap().token, session.token);
     drop(guard);
     fixture.stop().await;
 }

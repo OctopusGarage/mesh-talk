@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
-import { setLanguage } from "@/lib/i18n";
+import i18n, { setLanguage } from "@/lib/i18n";
 import { usePresence } from "@/store/presence";
 import { PresenceAvailability } from "./PresenceAvailability";
 
@@ -18,8 +18,8 @@ vi.mock("@/store/presence", async (importOriginal) => {
   };
 });
 
-it("announces unavailable presence without claiming Internet or peer sign-out", () => {
-  setLanguage("zh-Hans");
+it("announces unavailable presence without claiming Internet or peer sign-out", async () => {
+  await i18n.changeLanguage("zh-Hans");
   usePresence.setState({ unavailable: true });
   const html = renderToStaticMarkup(createElement(PresenceAvailability));
   expect(html).toContain('role="status"');

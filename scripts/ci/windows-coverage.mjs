@@ -469,6 +469,23 @@ export function validateProfilePath(profile, root, directory = path.join(root, "
   assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "LLVM_PROFILE_FILE must remain under workspace/target");
 }
 
+// Consumer reruns reuse the immutable artifact selected by the producer job.
+// Keep its attempt in archive identity while rejecting impossible future builds.
+export function windowsProducerAttempt(env) {
+  assert.match(
+    env.GITHUB_RUN_ATTEMPT ?? "",
+    /^[1-9]\d*$/u,
+    "Invalid consumer attempt",
+  );
+  const producer = env.MESH_WINDOWS_PRODUCER_ATTEMPT ?? env.GITHUB_RUN_ATTEMPT;
+  assert.match(producer, /^[1-9]\d*$/u, "Invalid producer attempt");
+  assert.ok(
+    BigInt(producer) <= BigInt(env.GITHUB_RUN_ATTEMPT),
+    "Future producer attempt",
+  );
+  return producer;
+}
+
 async function identity(
   evidence = () => undefined,
   profile = archiveProfile(),
@@ -594,7 +611,9 @@ async function identity(
     nextestConfigSha256: await fileHash(".config/nextest.toml"),
     runnerSha256: await fileHash(fileURLToPath(import.meta.url)),
     runId: process.env.GITHUB_RUN_ID,
-    runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+    runAttempt: profile.name === "windows"
+      ? windowsProducerAttempt(process.env)
+      : process.env.GITHUB_RUN_ATTEMPT,
   };
 }
 async function list(args, options) {

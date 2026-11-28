@@ -230,3 +230,54 @@ AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --sui
 The score is a source review. Real signed application replacement, authorization
 cancellation, relaunch, persistent data/session restoration and verified hosted
 publication remain separate acceptance requirements in [the update guide](../updates.md).
+
+### Linux headless idle resource benchmark
+
+The Linux archive producer in [CI](../../.github/workflows/ci.yml) measures the
+already-built workspace node. The fixture creates a fresh temporary encrypted
+profile, uses a separate UDP discovery port, waits for the real listener, then
+allows five seconds to settle. Startup has a separate 90-second limit, and
+early exit and readiness timeout have distinct errors. Five samples span about 15 seconds with no test
+traffic. No extra Cargo build, native desktop session or external peer is needed.
+
+Run on Linux after building `mesh-talk-node`:
+
+```sh
+python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+python3 -B scripts/evals/resource_benchmark.py target/debug/mesh-talk-node /tmp/resource-benchmark.json
+```
+
+The report records single-core CPU percentage from cumulative process ticks,
+peak sampled private resident KiB from `smaps_rollup`, and kernel-attributed
+write bytes from `/proc/PID/io`. The initial diagnostic budgets are 2%, 64 MiB,
+and 128 KiB per measurement window. Compare reports from the same runner and
+build profile. CI emits a warning and retains a summary and JSON artifact for
+breaches or measurement errors. The diagnostic is non-blocking while hosted
+baselines accumulate.
+
+To verify the real Linux counter and alert path, opt in to the quiet and
+synthetic pressure controls:
+
+```sh
+MESH_RESOURCE_CONTROL=1 python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+```
+
+The control keeps the normal warmup and sample windows and adds about 40 seconds.
+It checks the process exit status, JSON report and CI summary using real kernel
+counters. The pressure process caps storage writes at 32 MiB and reuses one
+temporary file. Use this as calibration evidence alongside the real-node
+benchmark. See the [performance guide](../performance-requirements.md#evidence-and-maintenance)
+for the longer reference workload and desktop attribution method.
+
+## Event-driven scheduling
+
+The [scheduled work suite](scheduled-work-ai-eval-suite.json) evaluates native
+alert scheduling, scoped device-sync refresh, notification permission on
+foreground activation, and the AI registration and recovery guidance. It pairs
+source judgments with the desktop reception tests, frontend timing tests and
+notification permission and linked-device browser scenarios. Native OS wakeups,
+energy and CPU require separate packaged-app measurements.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/scheduled-work-ai-eval-suite.json --report target/ai-eval/scheduled-work-report.json
+```

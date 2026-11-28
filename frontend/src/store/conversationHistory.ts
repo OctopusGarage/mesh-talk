@@ -441,6 +441,7 @@ export async function scanConversationHistory(
   conversations: Conversation[],
   revision: number,
   stillCurrent: () => boolean = () => true,
+  durableReception = false,
 ) {
   const lease = captureChatOwner(get);
   const current = () => lease.current() && stillCurrent();
@@ -449,6 +450,9 @@ export async function scanConversationHistory(
   };
   if (!current() || get().historyScanBusy) return;
   const changed = get().historyRevision !== revision;
+  // The durable cursor owns normal reception. A new account-history
+  // revision still requires legacy reconciliation for imported history.
+  if (durableReception && !changed && !get().historyScanQueue.length) return;
   let loaded = true;
   // Keep a bounded rotating work queue: later conversations receive a turn,
   // and an individual failure cannot force earlier snapshots to repeat.

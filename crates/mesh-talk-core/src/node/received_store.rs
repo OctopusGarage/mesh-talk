@@ -284,6 +284,9 @@ impl ReceivedStore {
             )
         })?;
         self.note_channel_commit(usize::from(inserted));
+        if inserted {
+            note_message_reception(entry, metadata, false, None);
+        }
         Ok(())
     }
     #[cfg(test)]
@@ -327,7 +330,7 @@ impl ReceivedStore {
             return Err(repository::invalid("file reception requires FILES owner"));
         }
         self.check_write()?;
-        let inserted = self.repository.profile.database().transaction(|c| {
+        let (inserted, manifest) = self.repository.profile.database().transaction(|c| {
             self.check_reception_owner_on(c)?;
             let stored;
             let original = match original {
@@ -341,10 +344,8 @@ impl ReceivedStore {
                     &stored
                 }
             };
-            let inserted = Self::install_file_on(c, entry, original, metadata)?;
+            let (inserted, manifest) = Self::install_file_on(c, entry, original, metadata)?;
             if !scopes.is_empty() {
-                let manifest = super::files::validated_manifest(&entry.plaintext)
-                    .ok_or_else(|| repository::invalid("invalid file manifest"))?;
                 for scope in scopes {
                     if scope.kind != crate::eventlog::EventKind::FileManifest
                         || scope.author != original.author
@@ -364,28 +365,29 @@ impl ReceivedStore {
                     )?;
                 }
             }
-            Ok(inserted)
+            Ok((inserted, manifest))
         })?;
         self.note_channel_commit(usize::from(inserted));
+        if inserted && let Some(metadata) = metadata {
+            note_message_reception(entry, metadata, false, Some(&manifest));
+        }
         Ok(())
     }
     /// The channel owner calls this after its receiver CAS and before batch
-    /// progress, all in one transaction. Return value counts newly retained rows.
+    /// progress, all in one transaction. Return the validated manifest alongside
+    /// whether a row was inserted so consumers can reuse the parsed result.
     pub(crate) fn install_file_on(
         c: &rusqlite::Connection,
         entry: &ReceivedEntry,
         original: &crate::eventlog::Event,
         metadata: Option<&super::reception_effects::ReceptionMetadata>,
-    ) -> Result<bool, LogError> {
-        if super::files::eligible_manifest_row(entry, Some(original), None).is_none() {
-            return Err(LogError::AdmissionRejected(
-                "invalid signed file reception".into(),
-            ));
-        }
+    ) -> Result<(bool, crate::file::AnyManifest), LogError> {
+        let manifest = super::files::eligible_manifest_row(entry, Some(original), None)
+            .ok_or_else(|| LogError::AdmissionRejected("invalid signed file reception".into()))?;
         if super::file_message_identity::IndexedFileMessageIdentities::row_suppressed_on(c, entry)?
         {
             super::filebook::indexed::mark_processed_on(c, entry.event_id)?;
-            return Ok(false);
+            return Ok((false, manifest));
         }
         let inserted = TranscriptRepository::put_on(
             c,
@@ -411,7 +413,7 @@ impl ReceivedStore {
                 metadata,
             )?;
         }
-        Ok(inserted)
+        Ok((inserted, manifest))
     }
     pub(crate) fn record(
         &mut self,
@@ -687,6 +689,61 @@ impl ReceivedStore {
             result.extend(page);
         }
     }
+}
+
+pub(in crate::node) fn note_message_reception(
+    entry: &ReceivedEntry,
+    metadata: &super::reception_effects::ReceptionMetadata,
+    group: bool,
+    manifest: Option<&crate::file::AnyManifest>,
+) {
+    use super::reception_effects::ArrivalKind;
+    use crate::transport::diagnostics::{self, ContentKind};
+
+    if !diagnostics::observing_messages() {
+        return;
+    }
+    // Keep decoding outside the diagnostics lock; no work when the lease is off.
+    if metadata.own_device || metadata.arrival_kind == ArrivalKind::HistorySync {
+        diagnostics::record_message(|metrics| {
+            let counter = if metadata.own_device {
+                &mut metrics.own_device_sync
+            } else {
+                &mut metrics.history_sync
+            };
+            *counter = counter.saturating_add(1);
+        });
+        return;
+    }
+    let (kind, size) = if let Some(manifest) = manifest {
+        let kind = if super::media_store::manifest_is_media(manifest) {
+            ContentKind::Media
+        } else {
+            ContentKind::Attachment
+        };
+        (kind, manifest.size())
+    } else {
+        let envelope = (!group)
+            .then(|| super::DmEnvelope::decode(&entry.plaintext))
+            .flatten();
+        let bytes = envelope
+            .as_ref()
+            .map_or(entry.plaintext.as_slice(), |envelope| {
+                envelope.body.as_slice()
+            });
+        let body = super::MessageBody::decode(bytes);
+        if let Some(sticker) = body.sticker {
+            (ContentKind::Sticker, sticker.len() as u64)
+        } else {
+            (ContentKind::Text, body.text.len() as u64)
+        }
+    };
+    diagnostics::record_message(|metrics| {
+        if metadata.arrival_kind == ArrivalKind::CatchUp {
+            metrics.catch_up = metrics.catch_up.saturating_add(1);
+        }
+        metrics.received(group, kind, size);
+    });
 }
 
 #[cfg(test)]

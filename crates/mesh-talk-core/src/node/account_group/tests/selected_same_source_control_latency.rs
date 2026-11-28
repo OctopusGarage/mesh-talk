@@ -2093,6 +2093,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .map(|(_, _, _, _, scope)| scope.clone())
         .unwrap_or_default();
     let b_requester_pages = Arc::new(Mutex::new(ControlTestPages::default()));
+    let b_requester_wake = Arc::new(Mutex::new(None));
     if let Some(other) = &other {
         let previous = other.account_client_test_hook.lock().unwrap().clone();
         *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
@@ -2103,11 +2104,18 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let own = other.identity.public();
             let scope = b_requester_scope.clone();
             let pages = b_requester_pages.clone();
+            let wake = b_requester_wake.clone();
             move |peer, phase| {
                 if let Some(previous) = &previous {
                     previous(peer.clone(), phase.clone());
                 }
                 let side = if peer == requester {
+                    if let Some(revision) = phase
+                        .strip_prefix("wake_received revision=")
+                        .and_then(|revision| revision.parse::<u64>().ok())
+                    {
+                        *wake.lock().unwrap() = Some((revision, std::time::Instant::now()));
+                    }
                     scope.lock().unwrap().observe(&phase, false);
                     pages.lock().unwrap().observe(&phase);
                     "B_to_requester"
@@ -3034,9 +3042,34 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     // all its input preparation before arming any timed B read.
                     release.close();
                     resumed_release.close();
-                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
-                        executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
-                    })).await.expect("the real A inputs and previous B pair must finish before the debt control is armed");
+                    super::cold_account_setup(async {
+                        // A fresh signed row witnesses the receiver comparison after
+                        // this setup revision. Older debounced Wakes are duplicates
+                        // once the receiver has acknowledged the new revision.
+                        let setup_key = crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                            &reference, ConversationId::new([71; 32]),
+                        );
+                        let setup_meta = reference.account_document_meta(&setup_key).unwrap();
+                        reference.note_account_local_change();
+                        let (_, revision) = send_boundary_wake(&reference, other).await;
+                        super::observe_account_fixture_condition(|| {
+                            if other.account_document_meta(&setup_key).as_ref() != Some(&setup_meta)
+                                || !executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
+                            {
+                                return false;
+                            }
+                            let Some((_, received_at)) = b_requester_wake.lock().unwrap()
+                                .filter(|(seen_revision, _)| *seen_revision >= revision)
+                            else {
+                                return false;
+                            };
+                            let pages = b_requester_pages.lock().unwrap();
+                            pages.pages.iter().any(|page| page.dispatched_at >= received_at)
+                                && pages.origins.iter().all(|origin| {
+                                    origin.lifetime.as_ref().is_none_or(|lifetime| lifetime.upgrade().is_none())
+                                })
+                        }).await;
+                    }).await.expect("the setup revision, real A inputs, and previous B work must finish before the debt control is armed");
                     executor_fault_armed.store(true, std::sync::atomic::Ordering::Release);
                     crate::node::account_documents::sync::seed_legacy_control_page_for_test(
                         &reference, ConversationId::new([69; 32]),

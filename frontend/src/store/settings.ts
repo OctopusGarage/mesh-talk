@@ -29,6 +29,8 @@ const emptyRegistration = (): ScreenshotRegistration => ({
   error: null,
 });
 let registrationRequest = 0;
+let muteRevision = 0;
+let muteUpdate: Promise<void> = Promise.resolve();
 
 /** App-setting flags the UI needs reactively (most settings are read in Rust, but a few —
  * like the experimental calls toggle and the ringtone — drive UI affordances / playback and
@@ -45,6 +47,8 @@ interface SettingsStore {
   setOwner: (owner: string | null) => void;
   /** Experimental voice/video calls — off by default, opt-in via the Settings dialog. */
   callsEnabled: boolean;
+  mutedGroups: string[];
+  setGroupMuted: (id: string, muted: boolean) => Promise<void>;
   notificationsEnabled: boolean | null;
   setNotificationsEnabled: (on: boolean) => void;
   /** The chosen incoming-call ringtone. */
@@ -63,10 +67,33 @@ interface SettingsStore {
 export { balancedPrivacy } from "@/lib/privacySettings";
 
 export const useSettings = create<SettingsStore>((set, get) => ({
+  mutedGroups: [],
+  setGroupMuted: (id, muted) => {
+    const lease = captureRuntimeOwner();
+    const current = () =>
+      lease.owner !== null && lease.current() && get().owner === lease.owner;
+    const task = muteUpdate.then(async () => {
+      if (!current()) throw new Error("Settings session changed");
+      const persisted = await readWithDeadline(() => settingsApi.get());
+      if (!current()) throw new Error("Settings session changed");
+      const groups = (persisted.muted_groups ?? []).filter(
+        (group) => group !== id,
+      );
+      if (muted) groups.push(id);
+      await settingsApi.update({ muted_groups: groups });
+      if (current()) {
+        muteRevision++;
+        set({ mutedGroups: groups });
+      }
+    });
+    muteUpdate = task.catch(() => {});
+    return task;
+  },
   owner: null,
   setOwner: (owner) => {
     if (get().owner === owner) return;
     registrationRequest++;
+    muteRevision++;
     set({
       screenshotShortcuts: { ...DEFAULT_SCREENSHOT_SHORTCUTS },
       screenshotShortcutsLoaded: false,
@@ -75,6 +102,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
       screenshotRecording: false,
       owner,
       callsEnabled: false,
+      mutedGroups: [],
       notificationsEnabled: null,
       ringtone: DEFAULT_RINGTONE,
       privacy: balancedPrivacy,
@@ -135,6 +163,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
   load: async () => {
     const lease = captureRuntimeOwner();
     if (!lease.owner || !lease.current() || get().owner !== lease.owner) return;
+    const revision = muteRevision;
     try {
       const s = await readWithDeadline(() => settingsApi.get());
       if (!lease.current() || get().owner !== lease.owner) return;
@@ -144,6 +173,9 @@ export const useSettings = create<SettingsStore>((set, get) => ({
         },
         screenshotShortcutsLoaded: true,
         callsEnabled: s.calls_enabled,
+        ...(revision === muteRevision
+          ? { mutedGroups: s.muted_groups ?? [] }
+          : {}),
         notificationsEnabled: s.notifications,
         ringtone: asRingtoneId(s.ringtone),
         privacy: privacyFromSettings(s),

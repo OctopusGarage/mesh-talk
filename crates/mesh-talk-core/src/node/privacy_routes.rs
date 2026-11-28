@@ -70,6 +70,7 @@ pub(crate) struct RouteCache {
     salt: [u8; SALT_SIZE],
     key: EncryptionKey,
     routes: Vec<Route>,
+    first_route: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 impl RouteCache {
     pub(crate) fn open(path: &Path, password: &str) -> io::Result<Self> {
@@ -80,6 +81,7 @@ impl RouteCache {
                 salt,
                 key: EncryptionKey::from_password(password, &salt).map_err(bad)?,
                 routes: Vec::new(),
+                first_route: None,
             };
             cache.save(&[])?;
             return Ok(cache);
@@ -150,8 +152,20 @@ impl RouteCache {
             salt,
             key,
             routes: snapshot.routes,
+            first_route: None,
         })
     }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+
+    pub(crate) fn observe_first_route(
+        &mut self,
+        notification: std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        self.first_route = Some(notification);
+    }
+
     pub(crate) fn record(&mut self, public: &PublicIdentity, ip: IpAddr) -> io::Result<()> {
         let id = public.user_id();
         let position = self
@@ -186,7 +200,11 @@ impl RouteCache {
             ),
         }
         self.save(&next)?;
+        let was_empty = self.routes.is_empty();
         self.routes = next;
+        if was_empty && let Some(waker) = &self.first_route {
+            waker.notify_one();
+        }
         Ok(())
     }
     pub(crate) fn routes(&self) -> Vec<(PublicIdentity, IpAddr)> {

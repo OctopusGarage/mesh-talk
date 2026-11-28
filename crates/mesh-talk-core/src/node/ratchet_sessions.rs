@@ -168,14 +168,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sessions.db");
         let mut store = RatchetSessions::open(&path, "pw").unwrap();
-        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        store.file.fail_replacements_for_test(true);
         let (alice, _) = make_pair();
         for _ in 0..40 {
             store.put("peer", &alice).unwrap();
         }
         assert!(store.put("peer", &alice).is_err());
         assert!(RatchetSessions::open(&path, "pw").unwrap().has("peer"));
-        std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
+        store.file.fail_replacements_for_test(false);
         let (mut advanced, mut bob) = make_pair();
         let (header, ciphertext) = advanced.ratchet_encrypt(b"first").unwrap();
         bob.ratchet_decrypt(&header, &ciphertext).unwrap();

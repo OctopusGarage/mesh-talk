@@ -21,6 +21,7 @@ import {
   verifyExecution,
   validateLcov,
   verifyIdentity,
+  windowsProducerAttempt,
   verifyTargets,
   validateProfilePath,
   verifyLayout,
@@ -768,4 +769,37 @@ test("Mac debug bundles follow exactly selected executable metadata, including e
   ]);
   binaries["rust-build-meta"]["non-test-binaries"].pkg[0].path = "../foreign";
   assert.throws(() => macDebugSymbolPaths(binaries, root), /target/);
+});
+
+test("Windows shard reruns retain the trusted producer attempt and reject future provenance", () => {
+  assert.equal(windowsProducerAttempt({ GITHUB_RUN_ATTEMPT: "1" }), "1");
+  assert.equal(
+    windowsProducerAttempt({
+      GITHUB_RUN_ATTEMPT: "2",
+      MESH_WINDOWS_PRODUCER_ATTEMPT: "1",
+    }),
+    "1",
+  );
+  for (const producer of ["", "0", "invalid", "3"])
+    assert.throws(() =>
+      windowsProducerAttempt({
+        GITHUB_RUN_ATTEMPT: "2",
+        MESH_WINDOWS_PRODUCER_ATTEMPT: producer,
+      }),
+    );
+  assert.throws(() =>
+    windowsProducerAttempt({ GITHUB_RUN_ATTEMPT: "invalid" }),
+  );
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /producer_attempt: \$\{\{ steps\.compiler\.outputs\.attempt \}\}/u,
+  );
+  assert.match(
+    workflow,
+    /MESH_WINDOWS_PRODUCER_ATTEMPT: \$\{\{ needs\.build\.outputs\.producer_attempt \}\}/u,
+  );
 });

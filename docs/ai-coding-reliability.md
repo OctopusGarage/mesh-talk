@@ -137,6 +137,8 @@ eventually returns. See `checked_at_lock_revision` in
 regression in [shared login tests](../src-tauri/src/shared_account_login/tests.rs),
 and queued notification tests in [runtime state](../src-tauri/src/chat_commands/state.rs).
 
+Account security mutations follow the same boundary: hold namespace serialization through preparation and publication, but acquire session and app-lock authority only around the prepared atomic replacement. Never retain the enrollment pending mutex while acquiring namespace or session authority. Same-seed imports retain local recovery consumption; verification metadata must not mutate shared configuration. Regression owners are identity account-security persisted tests and runtime-admission security publication tests.
+
 ## R02: Thread and scheduler progress
 
 **Failure pattern:** an `async` function performs blocking disk, crypto, OS-provider
@@ -158,6 +160,13 @@ Apply the same semantic boundary to native effects: the mounted
 unchanged notification context through peer freshness and ordering changes,
 while real conversation/device-set changes, session replacement and unmount
 retain publication and cleanup. Native revision admission still fences stale calls.
+Native previews must project names and typed content rather than render transport
+identifiers. Prepare alias/profile/group lookups on the bounded reception worker,
+then retain only sanitized presentation text through main-thread authority checks.
+The [preview owner](../src-tauri/src/events/presentation.rs) and its
+`notification_preparation_uses_aliases_group_names_and_safe_unknown_fallback`
+regression cover missing identity metadata, group files and contact aliases;
+protected-content controls must also reject filenames and sticker metadata.
 Prepare bulk data outside shared commit guards, then reacquire the required
 guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a
@@ -177,6 +186,17 @@ regression `scheduling_input_waits_for_history_without_blocking_its_reactor`
 holds real history while probing the observer's own reactor, then releases and
 joins both owners before checking the unchanged digest. A separate full-host
 SessionReady test retains the real network boundary and its original deadline.
+Top-level channel plaintext, join-history and metadata discovery share the
+serial repair owner. A notification received during remote work retains one
+local turn and one dirty follow-up; the remote future remains polled while the
+local turn waits for storage. Bounded network metadata preparation uses tracked
+leaf workers under its existing control/fanout owner, independently of the
+serial maintenance slot. Never hold repair capacity across a network exchange
+or make a network leaf wait for unrelated top-level maintenance.
+Keep foreground channel acceptance independent of that serial background queue.
+The host admission regression holds an unrelated producer while sending; the
+channel regression separately holds actual repair capacity. Both retain their
+200 ms progress bound and join the held owner before asserting the result.
 
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other
@@ -270,6 +290,12 @@ its single signed loopback probe and original deadline, and a real cache-path
 failure must preserve the cache API's error chain rather than time out. This
 control proves error visibility, not the cause of an earlier hosted timeout.
 
+An empty discovery snapshot admits no blocking cache task. A relay drain with
+no relay candidates must return before consulting historical peer proofs. A
+retirement fixture that holds the cache writer must seed a signed peer so it
+exercises real owned work. The relay discovery and runtime retirement tests
+cover these two paths separately.
+
 Sharing a read must not join unrelated latency dependencies. The roster owner
 shares only peers and people; conditional group metadata runs outside session
 and runtime-slot guards through participant-owned work. The held-metadata and
@@ -277,6 +303,9 @@ cancelled-observer controls in [owner commands](../src-tauri/src/owner_commands.
 require unrelated identity/peer progress and retirement to await the actual
 worker. Frontend roster tickets belong to one invalidation, preserve original
 evidence age and never carry a result into another runtime generation.
+The same rule applies to [channel custody reads](../src-tauri/src/chat_commands/channels.rs).
+Their held-read regression checks that both a transient app lock and same-owner
+replacement can proceed while the batch is held and can fence its result.
 
 ## R03: Actual work owns its lifetime
 
@@ -296,6 +325,9 @@ exclusive-open failures fatal rather than retrying around a live owner. The
 [cached-route restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
 awaits both original runtimes before asserting that an offline cached route is
 not fresh presence; retirement's held-writer controls retain lease exclusion.
+Take a final prepared-view cut after admitted producers and workers join: they
+can publish views after the initial cancellation cut. Await that final cleanup;
+`Drop` must not start new storage-owning work after an awaited stop has returned.
 Direct Node fixtures must also close work admission, join their accept owners,
 drain actual admitted children/blocking captures, and consume `close_profile`
 before reopening storage. Aborting and joining only the accept-loop parent does
@@ -311,6 +343,9 @@ hold the actual list promise beyond its UI deadline before requesting refresh.
 The [serial view reader tests](../frontend/src/features/chat/useSerialPoll.test.ts)
 apply the same lifetime rule to recovery timers and event coalescing, including
 hidden views and a follow-up admitted after all 64 read slots were occupied.
+The [notification permission tests](../frontend/src/lib/notify.test.ts) also
+cover two foreground observers after the watchdog expires. Both share the
+original native read until settlement, then the next activation may read again.
 
 Consume the canonical process owner's result contract rather than deriving a new
 verdict from a diagnostic flag. Windows atomically terminates its owned job even
@@ -469,6 +504,12 @@ account document/history controls require retained digests, pending demand and
 recovery without a false sync error. The same module retains bounded saturation,
 cancellation and priority-fairness controls.
 
+The participant relay owner distinguishes local resource deferral and a stale
+store cursor from relay failure. These outcomes preserve the relay's existing
+health and stay under the operation's retry pacing. Route failures still
+activate the relay cooldown. The [candidate ranking regression](../crates/mesh-talk-core/src/node/delivery_runtime.rs)
+requires a measured healthy relay to stay eligible after either local deferral.
+
 Distinct direct receipt and message-history scopes need independent polling
 inside their existing delivery owner; shared opaque-mailbox pulls remain serial. Serial receipt-first ordering merely
 reverses a dependency: a held receipt query must not prevent a fresh original
@@ -492,6 +533,12 @@ retaining store guards or increasing TCP capacity. The real inbound-only
 require a genuine pre-existing authenticated receipt through held ordinary
 history, fresh plaintext through held control history without false Delivered,
 and first-send confirmation after a deliberately early empty control round.
+A positive original Have must also allow its authenticated stream to collect
+its own receipt while an independent early probe remains held. Awaiting that
+probe's completion before the follow-up recreates the serial dependency inside
+otherwise concurrent futures. The held-early-probe regression requires the exact
+signed receipt and Delivered before releasing the other connection, while the
+held-all-receipts control still requires Awaiting despite positive custody.
 
 Do not encode failed, unchanged and completed work as one empty-result boolean
 when their retry policies differ. A qualified unchanged result needs fresh exact
@@ -634,6 +681,15 @@ older pending work; failed items pin a cursor; unbounded retries flood a queue;
 or a completion signal arrives between checking a condition and registering a
 waiter, leaving work asleep indefinitely.
 
+A presentation cache gate must include every semantic input to its eligibility
+rule, including online/offline transitions when presence overrides automatic
+expiry. Retained routing or historical expiry alone cannot establish current
+visibility. The [contact expiry owner](../src-tauri/src/contact_policy/expiry.rs)
+checks live presence, offline grace and attributable history before reclaiming
+its pending record; the
+[chat roster regressions](../frontend/src/store/chat.test.ts) require online
+restoration, offline grace/deletion and no account reload on unchanged heartbeats.
+
 A producer revision gate must precede expensive routing filters and projection
 hydration. Computing that gate must not repeatedly materialize unchanged metadata.
 Keep a bounded canonical digest at the existing content owner, invalidate it with
@@ -722,6 +778,30 @@ and no indexed page writes when a completed query's final lease is dropped.
 Opt-in diagnostic emission must also work in production log configurations;
 verify the target filter and real release output rather than relying on INFO
 macros that can be compiled out.
+
+Cache checkout establishes ownership and current authority, not preparation
+completion. A retained range selection may contain unfinished work. The session
+backend must prepare both cached and newly opened views before a compatibility
+exchange or exact-custody query reads them; protocol responders must use that
+prepared entry point rather than taking a raw cache shortcut. Keep bounded turns
+and cancellation at their existing owners. The `cached_partial_view_` regressions
+in [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+require preparation to finish and an authenticated exact-custody response to
+succeed without collecting event IDs or bodies. Reactivating a parked selection
+must also verify that its SQL owner is still live; reacquiring a runtime permit
+does not revive retired work. Ordinary cached checkout treats `StaleCursor` as
+a miss and prepares a fresh view, while storage failures remain errors. The
+`participant_durable_have_stale_derived_cache_is_a_miss` regression in the
+[participant adapter](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+retires derived work while retaining the durable message, then requires fresh
+authorized custody qualification. Range-service interceptors follow the same
+rule: a retained token identifies an earlier root and cannot certify readiness
+or current custody after resumed preparation or later appends. Reuse only a
+currently qualified prepared view; otherwise hand the query to the prepared
+responder while retaining range continuation ownership. The
+`stale_range_token_does_not_qualify_unprepared_exact_custody` regression in
+[range session tests](../crates/mesh-talk-core/src/node/session/range_sync.rs)
+covers the authenticated handoff with a real participant store.
 
 A deferred cursor with no remote continuation still owns local work. Retain it
 in the scheduler queue beneath its exact retry deadline; retaining a timestamp
@@ -1299,6 +1379,13 @@ read is silently treated as empty state; cleanup after a partial failure destroy
 recoverable user data.
 
 Identify the commit point, serialization owner and restart/replay behavior.
+A fallible range-reader turn must commit overlap counts together with its
+comparison frontier after every required read succeeds. Retaining the prefix
+while keeping partial counts makes its retry double-count known IDs and can
+misclassify cold repair as warm. The
+[range index regression](../crates/mesh-talk-core/src/eventlog/sync/range/index.rs)
+injects a mid-leaf read failure, retries that same prefix and checks the public
+repair classification, alongside remote cancellation and authority rollback.
 Keep local ingress evidence separate from message authorship and arrival timing.
 Capture it from the authenticated application peer at raw acceptance; transfer
 it with the canonical transcript commit, never infer it from a catch-up flag or
@@ -1563,6 +1650,14 @@ existing frame, file, count, depth and byte limits. Preserve exact account/devic
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
+
+Presentation classifiers shared with history/IPC consumers must tolerate absent
+legacy fields before calling string methods. A frontend static type does not
+validate older or partial projections. Keep unknown input as the existing
+nonmatching/fallback result, rather than throwing during unread reconstruction.
+The code-block classifier owns this check in
+[`codeBlock.ts`](../frontend/src/lib/codeBlock.ts); its absent-text regression and
+`chat.test.ts`'s persisted-identity lock/unlock scenario protect the boundary.
 
 Apply cheap exact-ID rejection before per-row export queries without skipping
 current view, owner, budget or cursor checks. Reuse compiled fixed SQL through the
@@ -2394,6 +2489,10 @@ expression preview/fallback/decode geometry consistent and preserve incoming
 consent, unavailable, retry and protected/read-only access through the existing
 [inline-media owner](module-boundaries.md#inline-media-presentation).
 
+Attachment save status follows the last successful local outcome. A verified saved path takes precedence over an earlier automatic-write error, including recovery through Save as. Both the conversation card and received-files view use that precedence. The [download recovery browser fixture](../frontend/e2e/download-remembered.spec.ts) covers explicit retry and saving to a different destination.
+
+Browser diagnostics fixtures must check the native command arguments. For manual discovery, the React adapter separates a user-entered endpoint into the host and optional discovery port expected by IPC. A bare IPv6 address stays intact. The [connection recovery browser scenario](../frontend/e2e/connection-recovery.spec.ts) checks the IPC payload and the query-sent state. The native diagnostics test observes the UDP query at a bound endpoint. Both boundaries are needed to validate manual discovery.
+
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
 text, sticker and file-card Awaiting/explicit projection separately; keep the
@@ -2568,6 +2667,12 @@ stabilize the persisted proof revision observed by finite sync views. The
 the actual cache owner at view capture and requires an unchanged revision;
 the original full-host scenario retains group access and DM/call rejection.
 Keep genuine authority-change invalidation intact rather than retrying over it.
+
+A retained range continuation may legitimately keep a finite cut after an append.
+An independent custody or legacy Have request must separately qualify source
+freshness before using that same selection. A valid retained lease does not prove
+that its answer includes a newly accepted record. Cover both boundaries together:
+the original continuation stays valid, while a fresh custody query sees the append.
 
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization

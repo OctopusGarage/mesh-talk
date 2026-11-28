@@ -4,6 +4,7 @@ import { errorMessage } from "@/lib/error";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import { useCalls } from "@/store/calls";
+import { stopGroupVoice } from "@/store/groupVoice";
 import { useAvatars } from "@/store/avatars";
 import { usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
@@ -26,6 +27,7 @@ function hideSensitiveState() {
   useContactPolicy.getState().reset();
   usePrivacy.getState().reset();
   useCalls.getState().teardown();
+  stopGroupVoice();
 }
 
 export const useAppLock = create<AppLockState>((set, get) => ({
@@ -35,6 +37,7 @@ export const useAppLock = create<AppLockState>((set, get) => ({
   lock: async () => {
     if (get().locked || !useAuth.getState().user) return;
     useCalls.getState().hangup();
+    stopGroupVoice(true);
     hideSensitiveState();
     set({ locked: true, busy: true, error: null });
     try {

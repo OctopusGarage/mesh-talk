@@ -1,16 +1,8 @@
 //! Finite append-only mailbox prefixes qualified by current relay policy.
 use super::*;
+use mesh_talk_protocol::mailbox::delta::{DeltaError, DeltaSelection};
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct MailboxCursor {
-    pub store_uuid: [u8; 16],
-    pub conversation: ConversationId,
-    pub epoch: i64,
-    pub first_seen: Option<u64>,
-    pub revision: i64,
-    pub after: i64,
-    pub window: Option<(i64, i64)>,
-}
+pub(crate) use mesh_talk_protocol::mailbox::rpc::{MailboxCursor, MailboxDeltaPage};
 
 /// Read-only invalidation hint; never a delivery checkpoint or receipt.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22,34 +14,7 @@ pub(crate) struct MailboxWatchToken {
     pub revision: i64,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct MailboxDeltaPage {
-    pub cursor: MailboxCursor,
-    pub ids: Vec<EventId>,
-    pub complete: bool,
-    pub reset: bool,
-}
-
 const SELECT_DELTA: &str = "SELECT commit_ordinal,id FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 AND commit_ordinal>=?3 AND commit_ordinal<?4 ORDER BY commit_ordinal,id LIMIT ?5";
-
-impl MailboxCursor {
-    fn accepts(&self, current: &Self) -> bool {
-        self.store_uuid == current.store_uuid
-            && self.conversation == current.conversation
-            && self.epoch == current.epoch
-            && self.first_seen == current.first_seen
-            && self.revision >= 0
-            && self.revision <= current.revision
-            && self.after >= 0
-            && self.after <= current.after
-            && self.window.is_none_or(|(upper, revision)| {
-                self.after <= upper
-                    && upper <= current.after
-                    && self.revision <= revision
-                    && revision <= current.revision
-            })
-    }
-}
 
 impl IndexedRelayState {
     pub(crate) fn mailbox_watch_snapshot_at(
@@ -73,7 +38,7 @@ impl IndexedRelayState {
             let durable_cutoff = durable_cutoff.map(decode_time).transpose()?;
             scopes.iter().map(|conv| {
                 let metadata = self.mailbox_on(c, conv)?;
-                let first_seen = metadata.filter(|m| !m.retained.retiring && !durable_cutoff.is_some_and(|cutoff|m.first_seen<=cutoff) && m.first_seen.saturating_add(crate::postoffice::MAX_RELAY_AGE.as_secs()) > now).map(|m|m.first_seen);
+                let first_seen = metadata.filter(|m| !m.retained.retiring && durable_cutoff.is_none_or(|cutoff|m.first_seen>cutoff) && m.first_seen.saturating_add(crate::postoffice::MAX_RELAY_AGE.as_secs()) > now).map(|m|m.first_seen);
                 let (epoch,revision): (i64,i64) = c.prepare_cached("SELECT destructive_epoch,revision FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()], |r|Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or((0,0));
                 if epoch < 0 || revision < 0 { return Err(invalid("negative mailbox watch authority")); }
                 Ok(MailboxWatchToken { store_uuid, conversation:*conv, epoch, first_seen, revision })
@@ -93,8 +58,8 @@ impl IndexedRelayState {
             .query_row([], |r| r.get(0))?;
         let (epoch, revision): (i64, i64) = c.prepare_cached("SELECT destructive_epoch,revision FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or((0,0));
         let after: i64 = c
-            .prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?
-            .query_row([RELAY_EVENTS.0.as_slice()], |r| r.get(0))?;
+            .prepare_cached("SELECT coalesce(max(commit_ordinal)+1,0) FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2")?
+            .query_row(params![RELAY_EVENTS.0.as_slice(), conv.as_bytes().as_slice()], |r| r.get(0))?;
         if epoch < 0 || revision < 0 || after < 0 {
             return Err(invalid("negative mailbox checkpoint authority"));
         }
@@ -125,62 +90,32 @@ impl IndexedRelayState {
         .validate()?;
         self.session_transaction(now, None, |c, cutoff| {
             let current = self.mailbox_cursor_on(c, conv, cutoff)?;
-            let reset = prior.is_some_and(|p| !p.accepts(&current));
-            let prior = prior.filter(|p| !reset && p.accepts(&current));
-            if let Some(prior) =
-                prior.filter(|p| p.window.is_none() && p.revision == current.revision)
-            {
-                return Ok(MailboxDeltaPage {
-                    cursor: prior.clone(),
-                    ids: vec![],
-                    complete: true,
-                    reset: false,
-                });
-            }
-            let mut cursor = prior.cloned().unwrap_or_else(|| MailboxCursor {
-                after: 0,
-                revision: 0,
-                ..current.clone()
-            });
-            let (upper, revision) = cursor.window.unwrap_or((current.after, current.revision));
+            let mut scan =
+                match DeltaSelection::open(&current, prior, limit).map_err(delta_error)? {
+                    DeltaSelection::Unchanged(page) => return Ok(page),
+                    DeltaSelection::Scan(scan) => scan,
+                };
             let mut stmt = c.prepare_cached(SELECT_DELTA)?;
             let mut rows = stmt.query(params![
                 RELAY_EVENTS.0.as_slice(),
                 conv.as_bytes().as_slice(),
-                cursor.after,
-                upper,
-                (limit + 1) as i64
+                scan.lower(),
+                scan.upper(),
+                scan.query_limit(),
             ])?;
-            let mut ids = Vec::with_capacity(limit);
-            let mut complete = true;
             while let Some(row) = rows.next()? {
-                if ids.len() == limit {
-                    complete = false;
+                if !scan.accept_row() {
                     break;
                 }
                 let ordinal: i64 = row.get(0)?;
                 let id: Vec<u8> = row.get(1)?;
-                ids.push(EventId::new(
+                let id = EventId::new(
                     id.try_into()
                         .map_err(|_| invalid("invalid mailbox event identity"))?,
-                ));
-                cursor.after = ordinal
-                    .checked_add(1)
-                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                );
+                scan.push(ordinal, id).map_err(delta_error)?;
             }
-            if complete {
-                cursor.after = upper;
-                cursor.revision = revision;
-                cursor.window = None;
-            } else {
-                cursor.window = Some((upper, revision));
-            }
-            Ok(MailboxDeltaPage {
-                cursor,
-                ids,
-                complete,
-                reset,
-            })
+            Ok(scan.finish())
         })
     }
 
@@ -214,6 +149,14 @@ impl IndexedRelayState {
             if allocated > 4 * 1024 * 1024 { return Err(LogError::PageBudgetTooSmall { required: allocated }); }
             ids.iter().map(|id| self.repository.get_on(c,id)?.ok_or(LogError::StaleCursor)).collect()
         })
+    }
+}
+
+fn delta_error(error: DeltaError) -> LogError {
+    match error {
+        DeltaError::InvalidLimit => LogError::InvalidPageBudget,
+        DeltaError::OrdinalExhausted => LogError::RepositoryCounterExhausted,
+        DeltaError::InvalidOrdinal => LogError::StaleCursor,
     }
 }
 

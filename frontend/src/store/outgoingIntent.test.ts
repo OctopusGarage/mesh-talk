@@ -430,6 +430,19 @@ it("retires an expired completion after its conversation cache was evicted", () 
   expect(result.messages).toEqual({});
 });
 
+it("preserves direct projection references when no outgoing status changed", async () => {
+  const store = session();
+  const messages = {
+    [key]: [{ ...row("delivered"), delivery: "delivered" as const }],
+  };
+  const intents = store.getState().intents;
+  store.setState({ messages });
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(invoke).not.toHaveBeenCalled();
+  expect(store.getState().messages).toBe(messages);
+  expect(store.getState().intents).toBe(intents);
+});
+
 it("coalesces delivery invalidations received during a stale status read", async () => {
   const store = session();
   store.setState({

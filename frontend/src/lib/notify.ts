@@ -4,6 +4,7 @@ import {
   type NotificationPermission,
 } from "./api/notifications";
 import { readWithDeadline } from "./readDeadline";
+import { startRecoveryRefresh } from "./recoveryRefresh";
 
 interface PermissionState {
   permission: NotificationPermission | null;
@@ -32,15 +33,31 @@ export const useNotificationPermission = create<PermissionState>((set, get) => {
     refresh: () => {
       if (authorization) return authorization;
       if (observation) return observation;
-      set({ checking: true });
-      observation = readWithDeadline(notifications.check)
+      let nativePending: Promise<void> | undefined;
+      observation = readWithDeadline(() => {
+        const native = notifications.check();
+        const settled = () => {
+          nativePending = undefined;
+        };
+        nativePending = native.then(settled, settled);
+        return native;
+      })
         .then((permission) => {
           set({ permission });
         }, unavailable)
         .finally(() => {
-          observation = null;
+          // End presentation loading on time, while the native check keeps
+          // its single shared slot until it actually settles.
+          if (nativePending) {
+            void nativePending.then(() => {
+              observation = null;
+            });
+          } else {
+            observation = null;
+          }
           set({ checking: false });
         });
+      set({ checking: true });
       return observation;
     },
     enable: (current = () => true) => {
@@ -75,14 +92,7 @@ export function watchNotificationPermission() {
   const refresh = () => {
     void useNotificationPermission.getState().refresh();
   };
-  const visible = () => {
-    if (document.visibilityState === "visible") refresh();
-  };
+  const stop = startRecoveryRefresh(refresh, { intervalMs: null });
   refresh();
-  window.addEventListener("focus", refresh);
-  document.addEventListener("visibilitychange", visible);
-  return () => {
-    window.removeEventListener("focus", refresh);
-    document.removeEventListener("visibilitychange", visible);
-  };
+  return stop;
 }

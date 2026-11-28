@@ -1,0 +1,194 @@
+# Project decisions
+
+Use this log to recover conclusions from discussions, implementation and
+verification when they affect future work.
+
+## Find or record a decision
+
+- Before reopening a question, scan the topic headings or search this file for
+  the feature, term or requirement ID. Follow links for current behavior and
+  supporting evidence.
+- Record a decision when it resolves a recurring question or changes what a
+  later contributor should do. Use a descriptive heading and a short paragraph
+  covering the decision and why it was made. Add a status when implementation
+  or verification is pending. Include alternatives, evidence links and revisit
+  conditions when they help the next reader make a decision.
+- Update the existing entry when the conclusion or its status changes. If the
+  old rationale still explains earlier work, mark it superseded and link to the
+  current decision. Keep feature contracts and operating instructions in their
+  owning guides.
+
+## One shared decision log (REQ-022)
+
+Use this file as the shared location for concise decisions from discussions,
+implementation and verification. Link it from the agent instructions and
+[documentation hub](README.md) so a later session can find it from either entry
+point. A shared file keeps lookup and updates simple when the reader has little
+prior context. Revisit the organization if topic headings and search no longer
+make relevant decisions easy to find.
+
+## Share the Mesh Foundation libraries through a pinned source snapshot
+
+Keep the reusable Rust libraries together in Mesh Foundation. Mesh Talk
+consumes a pinned source snapshot so its builds can run without credentials
+for the private SDK repository. Update the snapshot from a verified SDK
+revision and keep its provenance alongside the source. Keep Mesh Talk's
+product authorization and lifecycle in its adapters. Replication defines its
+own transport interface so a consumer can compose it with Mesh Connect or
+another suitable channel. See the [architecture reference](ARCHITECTURE.md#mesh-foundation-libraries).
+
+Use the SDK range summary wire codec for every application range index. Keep
+authorization, prepared-view lifetime, and durable admission with the
+application repository; a canonical summary does not establish custody.
+
+## Use introduction distance as a relay ranking hint
+
+A targeted exchange uses the known correspondent's fresh directory distance
+alongside authenticated timing and retry state. A first timeout supplies routing
+evidence even before a successful sample. Origin distance estimates forwarding
+work, while timing observes the local leg and control exchange. Retain the
+configured healthy preference and rotate fallback relays because either direction
+can have durable copies on other paths. See the [relay ordering contract](network-design-reference.md#c-relay-preference-failover-and-partitions).
+
+### Bound production group recovery turns
+
+Production callers use `request_sync_turn_paged`, which negotiates indexed turns
+and reports explicit completion, continuation or policy limits. The original
+`request_round_paged` remains an explicit legacy drain API for compatibility.
+Its production fallback, `request_legacy_turn_paged`, caps transfers at 200 events,
+1 MiB encoded bodies and eight protocol steps. It bounds preparation and inventory
+admission; oversized old-peer responses are rejected before apply. Interrupted
+legacy exchanges retire their channel and do not establish convergence. No
+seven-day retention or control/key-event filter is introduced.
+
+### Negotiate indexed group turns instead of truncating Have
+
+New group peers negotiate a domain-separated fingerprint capability probe before
+using dedicated range-summary/body frames. An old peer's ordinary unmatched
+response opts out. Range limits, invalid snapshots or allocation pressure never
+silently downgrade to a full Have exchange. The existing compatibility requester
+can compare a qualified cached fingerprint, but mismatched inventory admission is
+limited to 2,000 IDs and eight frames; large unsupported peers remain explicitly
+limited rather than appearing converged.
+
+The production source index contains only qualified outgoing SQL selection IDs,
+not raw repository rows or pending-only Have contributors. Exact body requests
+use the same selected outgoing rows, existing bounded dependency preparation,
+current access checks and bounded body loader. Each connection pins a source view;
+new probes requalify pooled snapshots and qualified ordinary appends extend the
+prepared prefix. Cold derived preparation, receiver indexes and checkpoints are
+retained under the existing peer/scope-qualified owner across bounded turns.
+
+Range turns support both directions through explicit role reversal. Each direction
+reserves at most two summary RPCs plus its open/body exchange, 100 events and
+512 KiB encoded event bodies. The entire reconciliation turn is bounded by 200
+events, 1 MiB and eight RPCs; explicit custody/receipt confirmation remains its
+separate existing bounded lane. Individual replies also respect the transport
+frame ceiling. Up to 32 canonical leaf IDs amortize summary round trips.
+
+`More` carries the actual local commit report, recycles a balanced session and
+requeues group work fairly without transport-failure backoff. `Limited` remains
+incomplete, parks for source/policy changes or sparse repair and grants neither
+quiet/equality evidence nor custody. Unavailable IDs are deferred behind other
+frontier work; a completed ID response is validated as an exact unique set before
+commit. Local applied counts never include reverse-direction remote commits.
+
+The existing frontend history projection already defaults to 200 records in
+`frontend/src/store/conversationHistory.ts`. No seven-day retention filter or
+cryptographic/control-event truncation is introduced.
+
+Legacy budget exhaustion can interrupt an old-peer exchange; that channel is
+retired and follows the existing transport retry policy. It is not recycled as a
+clean `Limited` range turn. New-profile `More`/`Limited` retain the explicit fair
+continuation/sparse-repair behavior described above.
+
+### Separate recent navigation from causal completeness
+
+Remote recent/older pages use a distinct negotiated profile and the already
+qualified outgoing Message selection. Default 200 records are capped further by
+body bytes; membership, keys and dependency repair keep their existing lanes.
+A recent page never establishes whole-group equality or custody. Missing external
+parents keep canonical DAG admission strict: Blocked can expose older navigation
+across a reported gap, without acknowledging rejected records as durably present.
+The UI preserves the gap until an explicit fresh recent retry succeeds.
+
+Disk-spilling encrypted SQL range summaries remove the full-history RAM index
+barrier. They remain derived scoped data under selection lifetime, not cached
+permission authority across restart. All local reads succeed before a checkpoint
+frontier is advanced; storage errors are neither empty sets nor equality.
+
+Group range repair negotiates a v2 ordered dependency lane. Random ID discovery
+can encounter children before parents; ascending qualified source ranks repair
+those gaps without weakening DAG admission. Bounded parent anchors seek near
+the missing dependency, while an acknowledged page cursor preserves progress.
+Finishing that lane restarts Merkle comparison rather than asserting equality.
+The encrypted derived index uses a soft SQL quota separately from the hard RAM
+quota, so a large authorized group is not permanently excluded by idle caching.
+
+While an ordered forward repair is active, defer reverse preparation for that
+turn. This preserves its captured dependency prefix and avoids reconstructing an
+unfinished reverse plan against a newer logical generation. Resume the reverse
+lane after repair; neither deferral nor an exhausted repair page proves equality.
+
+## Reclaim never-chatted contacts only after an offline grace period
+
+Retain online contacts. Each observed transition to offline starts a new local
+24-hour grace period, which reconnect cancels. Expiry deletes the unused contact's
+pending record rather than preserving a permanent filter/tombstone; stale offline
+routes cannot recreate it. Ever-chatted accounts remain protected after history
+clear. Explicit hide/delete controls keep precedence. The
+[contact policy](privacy-controls.md#discovered-contacts-without-chat-history)
+owns the storage migration, bounds and recovery contract. Reuse existing roster
+observations and contact-deadline scheduling; no separate cleanup worker or exact
+timing guarantee is needed. Regressions cover lifecycle transitions, actual
+metadata reclamation, history protection and unchanged-input no-write behavior.
+
+## Native notification presentation
+
+Prepare contact/group names and typed message summaries on the existing bounded
+reception worker, before main-thread presentation. Reuse local favorites, signed
+account profiles and retained verified routing identities; never expose a raw
+fingerprint as a display-name fallback. Keep transport payload identifiers intact.
+This replaces separate text/file title conventions without adding a renderer or
+network dependency. See [notification previews](settings.md#native-notification-previews)
+for privacy, language, resource and verification boundaries.
+
+## Image text extraction uses system Vision
+
+Ordinary macOS image previews use explicit on-demand Vision OCR and a selectable
+text panel, without an external OCR engine or model. WebKit image selection is an
+opportunistic convenience, not the extraction contract. VisionKit interactive
+overlays remain deferred until their asynchronous native path has real completion
+and selection evidence. Bounds and lifecycle belong to
+[inline media presentation](module-boundaries.md#inline-media-presentation).
+
+## Group notification muting preserves unread history
+
+Group muting is an account-local device preference, separate from message reception
+and read state. Ordinary muted messages retain recoverable unread history while
+row and application badges project only attention-worthy messages. Existing
+name-based mentions retain their notification exception; whole-message code
+blocks do not contain actionable mentions. Native presentation applies current
+settings under the existing session authority, preserving localized notification
+previews. See [notification help](help/topics/notifications.md#mute-a-group) and
+[module ownership](module-boundaries.md#group-notification-attention). Focused
+policy and persistence regressions cover the contract; physical macOS/Windows
+notification and resource acceptance remain pending.
+
+## Optional account authentication policy uses private account access
+
+TOTP is account-scoped and disabled by default. Its versioned policy travels in
+private account login records; local replay and throttle state never travels.
+Authenticated installation uses generation CAS and rejects equal-generation
+policy conflicts. Legacy records without security policy remain compatible;
+explicit unknown formats fail closed. Setup requires fresh native identity
+verification, one session/lock-bound pending enrollment, and confirmation before
+durable activation. Native mutation results expose pending publication separately
+from local acceptance. This does not provide independent protection against
+password-plus-file compromise or distributed replay/rollback protection.
+
+### Local TOTP recovery consumption
+
+Recovery verifiers remain immutable policy configuration. Consumption is bounded encrypted local history scoped to the enrollment seed; same-seed imports preserve it, while a new seed resets it. Local proof attempts and consumption do not advance shared policy generations. Offline devices cannot guarantee globally single-use recovery codes.
+
+Native acceptance selectors in src-tauri/validation.json exercise stalled begin, confirm and disable preparation through the command mutation path, plus signed loopback pairing and desktop policy installation. Preparation must permit session invalidation before release; stale operations must return errors without publishing seeds, policy or recovery consumption. Loopback evidence does not establish physical-machine interoperability, native authenticator behavior, or measured startup/idle resource budgets.

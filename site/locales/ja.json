@@ -244,6 +244,7 @@
   "Choose a desktop download": "デスクトップ版を選択",
   "{label} is unavailable in this release.": "このリリースでは{label}を利用できません。",
   "ZIP · {size} MB": "ZIP · {size} MB",
+  "{format} · {size} MB": "{format} · {size} MB",
   "Stable {version} · Choose your computer’s architecture. Downloads are hosted on GitHub.": "安定版 {version} · お使いのコンピューターのアーキテクチャを選択してください。ダウンロードはGitHubで提供されます。",
   "Stable {version} · {platform} · {label} · {size} MB ZIP": "安定版 {version} · {platform} · {label} · {size} MB ZIP",
   "Open Mesh-Talk on your Mac": "MacでMesh-Talkを開く",

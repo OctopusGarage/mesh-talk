@@ -60,6 +60,26 @@ it.each(["photo.png", "sticker.webp", "document.pdf"])(
   },
 );
 
+it("distinguishes exact relay custody from recipient confirmation", async () => {
+  await i18n.changeLanguage("en");
+  for (const custody of [
+    "post_office",
+    "recipient_registered_office",
+  ] as const) {
+    const message = {
+      ...base,
+      delivery: "awaiting" as const,
+      deliveryCustody: custody,
+    };
+    const html = render(message);
+    expect(html).toContain(`data-delivery-custody="${custody}"`);
+    expect(html).toContain('data-delivery="awaiting"');
+    expect(render({ ...message, delivery: "delivered" })).not.toContain(
+      "data-delivery-custody",
+    );
+  }
+});
+
 describe("automatic delivery footer", () => {
   it("names a received file offer without claiming file delivery", async () => {
     await i18n.changeLanguage("en");
@@ -188,6 +208,7 @@ describe("automatic delivery footer", () => {
       "zh-Hans",
       "zh-Hant",
     ]) {
+      await i18n.changeLanguage(language);
       for (const key of [
         "awaiting",
         "delivered",
@@ -210,7 +231,6 @@ describe("automatic delivery footer", () => {
         expect(
           i18n.getResource(language, "translation", `message.custody.${key}`),
         ).toBeTruthy();
-      await i18n.changeLanguage(language);
       const markup = render({
         ...base,
         metadataPending: true,

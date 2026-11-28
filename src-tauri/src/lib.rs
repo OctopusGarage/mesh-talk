@@ -16,6 +16,7 @@
 // Tauri desktop shell over it.
 pub mod account_documents;
 pub mod account_profile;
+mod account_security;
 pub mod app_lock;
 pub mod avatars;
 mod background_command;
@@ -33,7 +34,10 @@ pub mod events;
 pub mod favorites;
 mod google_drive;
 mod history_storage;
+mod image_text;
 mod integrations;
+mod lan_review;
+mod lan_review_http;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
@@ -127,7 +131,9 @@ pub fn run_tauri_configured(
             .set(root)
             .expect("runtime configured only once");
     }
-    let _timer = perf_monitor!("application_startup");
+    let started = std::time::Instant::now();
+    crate::diagnostics::record_desktop_start(started);
+    let mut desktop_start = Some(started);
     log::info!("Starting Mesh-Talk desktop runtime");
 
     // Data directory + file manager (~/.mesh-talk), shared by the auth keystore.
@@ -185,7 +191,7 @@ pub fn run_tauri_configured(
             }
         }));
     // Extensions come after single-instance, which must remain the first plugin.
-    extend(builder)
+    let builder = extend(builder)
         // Restore window size/position across launches (clamps off-screen geometry).
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -194,12 +200,14 @@ pub fn run_tauri_configured(
                         & !tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
                 .build(),
-        )
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(crate::screenshot_shortcuts::handle_shortcut)
-                .build(),
-        )
+        );
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(crate::screenshot_shortcuts::handle_shortcut)
+            .build(),
+    );
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -211,6 +219,8 @@ pub fn run_tauri_configured(
             Some(vec!["--hidden"]),
         ))
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            app.manage(crate::window_visibility::ObservedMinimized::default());
             #[cfg(target_os = "linux")]
             app.manage(crate::window_visibility::HiddenPositions::default());
             if let Err(e) = crate::logger::init_logging(app.handle()) {
@@ -312,6 +322,10 @@ pub fn run_tauri_configured(
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
             crate::window_visibility::observe_window_event(window, event);
+            #[cfg(target_os = "windows")]
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
+                crate::window_visibility::publish_minimized(window);
+            }
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
             {
@@ -364,6 +378,7 @@ pub fn run_tauri_configured(
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,
                 owner_commands::owner_reveal_image,
+                image_text::owner_recognize_image_text,
                 owner_commands::owner_enqueue_channel_text,
                 owner_commands::owner_enqueue_channel_sticker,
                 owner_commands::owner_enqueue_channel_file,
@@ -372,6 +387,12 @@ pub fn run_tauri_configured(
                 owner_commands::owner_account_history,
                 owner_commands::owner_delivery_statuses,
                 commands::login,
+                account_security::account_totp_status,
+                account_security::account_totp_begin,
+                account_security::account_totp_confirm,
+                account_security::account_totp_disable,
+                account_security::account_totp_cancel,
+                account_security::account_totp_retry_sync,
                 device_enrollment::begin_device_enrollment,
                 device_enrollment::probe_device_enrollment,
                 device_enrollment::complete_device_enrollment,
@@ -385,6 +406,7 @@ pub fn run_tauri_configured(
                 crate::privacy_commands::accept_account_binding_change,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
+                crate::privacy_commands::set_personal_privacy,
                 crate::privacy_commands::initiate_privacy_contact,
                 commands::logout,
                 commands::register,
@@ -421,6 +443,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::list_peers,
                 crate::chat_commands::send_dm,
                 crate::chat_commands::send_call_signal,
+                crate::chat_commands::group_voice_member,
                 crate::chat_commands::history,
                 crate::chat_commands::account_id,
                 crate::chat_commands::publish_avatar,
@@ -463,6 +486,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
                 crate::chat_commands::channel_history,
+                crate::chat_commands::fetch_channel_history_page,
                 crate::chat_commands::send_file_dm,
                 crate::chat_commands::send_file_channel,
                 crate::chat_commands::save_file,
@@ -485,6 +509,9 @@ pub fn run_tauri_configured(
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
                 crate::owner_commands::owner_reaction_summaries,
+                crate::lan_review::owner_preview_lan_review,
+                crate::lan_review::owner_start_lan_review,
+                crate::lan_review::owner_revoke_lan_review,
                 crate::message_forwarding::owner_inspect_forward_messages,
                 crate::message_forwarding::owner_list_forward_batches,
                 crate::message_forwarding::owner_forward_messages,
@@ -523,6 +550,9 @@ pub fn run_tauri_configured(
                 crate::logger::read_log_tail,
                 crate::logger::save_log_tail,
                 crate::diagnostics::env_info,
+                crate::diagnostics::host_resource_sample,
+                crate::diagnostics::start_host_resource_sampling,
+                crate::diagnostics::stop_host_resource_sampling,
                 crate::updates::check_for_update,
                 crate::updates::download_update,
                 crate::updates::native::prepare_update,
@@ -587,7 +617,12 @@ pub fn run_tauri_configured(
             log::error!("Error while running tauri application: {e}");
             std::process::exit(1);
         })
-        .run(|app, event| {
+        .run(move |app, event| {
+            if matches!(event, tauri::RunEvent::Ready)
+                && let Some(started) = desktop_start.take()
+            {
+                crate::diagnostics::record_desktop_ready(started.elapsed());
+            }
             #[cfg(target_os = "macos")]
             if matches!(event, tauri::RunEvent::Reopen { .. })
                 && let Err(error) = crate::window_visibility::restore_main(app)

@@ -62,6 +62,39 @@ access. Network waits in one producer must not serialize identity, presence,
 history or unrelated sends. Retirement still waits for every admitted lease;
 session authorization continues to enclose synchronous commits.
 
+### Mesh Foundation libraries
+
+Mesh Talk composes selected mechanisms from the seven-crate [Mesh Foundation SDK](https://github.com/OctopusGarage/mesh-foundation). The application-owned `mesh-talk-protocol` retains historical identity, discovery and mailbox formats.
+
+| Library | Reusable implementation |
+| --- | --- |
+| `mesh-connect` | Noise sessions, bounded framing, sockets, signed discovery and candidate selection |
+| `mesh-replication` | Inventories and digests, bounded reconciliation, paged requester and responder |
+| `mesh-identity` | Device signing keys, account identities and device certificates |
+| `mesh-e2ee` | Ratchets, sender keys and encrypted-state checkpoints |
+| `mesh-storage` | Encrypted records, durable append and atomic rewrite |
+| `mesh-mailbox` | Opaque envelopes, bounded delta retrieval, capacity and durable spool |
+| `mesh-blob` | Chunk encryption, indexed nonces and integrity checks |
+
+Replication accepts session and authorized store adapters. Mesh Talk uses its
+existing authenticated protocol and indexed event repository to implement them.
+The node owns group membership, key distribution, and account trust. It also
+schedules discovery, reconnects, and relay maintenance. Its mailbox service
+uses the application-owned compatibility dispatcher and indexed custody store;
+generic capacity and finite-window paging mechanisms come from the SDK.
+Other hosts can use the library's bounded spool with their own admission and
+expiry scheduling. File transfers use the library's chunk primitives while
+Mesh Talk owns the manifest and transfer lifecycle.
+
+Group range exchange uses the SDK's canonical prefix, summary frame codec, and
+leaf proof validation. The SDK owns the canonical in-memory index and fallible `RangeRead` contract.
+The application owns SQL storage and authorization-bound snapshots, its
+causal-repair checkpoint, and the scheduling of unavailable records.
+The signed attachment lane applies each body through the event repository:
+source selection, per-attempt consent, authenticated author checks and durable
+event admission stay with the node. The generic blob downloader works with a
+chunk store and returns a verified object.
+
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
 ### Protected messages
@@ -128,10 +161,14 @@ returns the authenticated deadline for per-message countdowns. A single desktop
 session monotonic clock removes expired cached messages and outgoing intents and updates
 countdowns without per-message IPC. Focus and visibility changes recheck deadlines;
 the history dialog filters and clears its own expired rows.
-A one-second core maintenance task removes plaintext sidecars on both sides,
-cancels expired outgoing retry work, suppresses replay through account sync, and
-removes locally managed media. Queries enforce deadlines independently of cleanup;
-cleanup errors are logged and retried on the next maintenance pass. A monotonic
+Core expiry maintenance removes plaintext sidecars on both sides, cancels expired
+outgoing retry work, suppresses replay through account sync, and removes locally
+managed media. A successful pass with no tracked deadlines parks until an indexed
+profile commit, a separate expiring delivery or favorites journal commit, or
+sparse repair.
+Active deadlines and errors retain the one-second check so forward clock changes
+and failed erasure are serviced promptly. Queries enforce deadlines independently
+of cleanup. A monotonic
 observation timer also bounds the lifetime by the sender event's intended duration if the local
 wall clock was already wrong when the message arrived. On restart the prior monotonic
 clock anchor cannot be recovered; expiring recipient copies are erased early to
@@ -152,6 +189,8 @@ SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the ac
 - **At rest** (`storage/encryption.rs`) — `salt(16) ‖ nonce(12) ‖ AES-256-GCM(secret)`,
   key via **PBKDF2-HMAC-SHA256, 600k rounds**. Used by every store (device/account
   keystore, event log, sent/received logs, ratchet sessions, channel senders, post office).
+  The record-store derivation uses ring and preserves the existing password bytes,
+  salt, iteration count and key bytes. SQLCipher owns its separate database KDF.
 - **Transport** (`transport/`, snow) — **Noise_XX_25519_ChaChaPoly_BLAKE2s** with a
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
 handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
@@ -161,7 +200,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   authenticated identity is still checked afterward. `accept_with_admission`
   lets an SDK host reject a verified device before sending its own identity auth.
   Noise XX still reveals the responder's static key, so this is not anonymity.
-- **DM crypto** — **Double Ratchet** (`ratchet/state.rs` + `node/dm_ratchet.rs`):
+- **DM crypto** — **Double Ratchet** (`mesh-e2ee::ratchet` + `node/dm_ratchet.rs`):
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   fresh DH chains provide forward secrecy + post-compromise recovery, subject to
   the bootstrap limitation below; bounded out-of-order (1000/2000); lower
@@ -186,7 +225,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   and durable clear tombstones preserve offline convergence without coupling
   updates to membership epochs or ordinary message retention. Private avatar
   overrides retain their account-document owner. See [group announcements](help/topics/channels.md#group-announcements).
-- **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
+- **Channels** — per-sender **sender-key** group ratchet (`mesh-e2ee::sender_key`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
   persisted so a restarted node can resume sending. The static-recipient sealed
@@ -1467,6 +1506,11 @@ those system input paths. Preserve locked-entry behavior and hidden autostart.
 
 ### Recent search references
 
+The search dialog admits one native query at a time. While it runs, a
+new debounced query replaces the pending query. Closing the dialog or
+retiring its owner discards pending work. A completed query can publish
+results only while its exact input and owner remain current.
+
 The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches
 with a `SearchReference` and an explicit `per_conversation_limit` of 2,000.
 Eligibility reuses the existing search owner: available human device proofs,
@@ -1490,10 +1534,13 @@ case-insensitively. Accepted pending transactions and sibling-copy deduplication
 follow the owning history projection. Returned matches sort newest wall-clock
 first; ties within a conversation retain reverse canonical history order.
 Missing matches do not establish absence from all retained or remote history.
-Canonical history scans borrowed retained metadata and copies message content
-only for the selected window. Identity deduplication and channel causal ordering
-still require metadata proportional to retention; this is not a constant-cost,
-paged or complete retained-history search.
+Canonical history uses persistent ranks to select the recent window before
+loading transcript bodies. Point reads reuse the connection's prepared SQL
+for ordinal and body lookups. Each execution reads and validates the current
+row. Initial or invalidated rank preparation can still
+traverse broader history to establish identity deduplication and causal order.
+This is a recent-window search. Its cost depends on the number of eligible
+conversations, selected bodies and whether their ranks are ready.
 
 `Node::search_context` resolves an exact reference through the same conversation
 eligibility and canonical history owners. Missing, zero, expired or recalled
@@ -1501,8 +1548,8 @@ targets are unavailable. A found context contains the target and up to 25
 neighbors on each side in canonical order, plus the number of entries after the
 target. Recalled neighbors retain only their tombstone; their re-edit plaintext
 is omitted. Context reads do not change cache coverage, unread state or delivery.
-The output window contains at most 51 decoded history rows. Retained identity
-selection and ordering have the same metadata traversal cost as recent search.
+The output window contains at most 51 decoded history rows and uses the same
+canonical rank owner as recent search.
 
 Desktop `owner_search_recent` and `owner_search_context` capture explicit session
 ownership before queued work and recheck it before publication. References are
@@ -1512,12 +1559,13 @@ Queries accept at most 4,096 UTF-8 bytes. Search returns a newest-first prefix
 with at most 200 hits and 1 MiB of serialized output, setting `truncated` when
 either result budget omits matches. The desktop uses
 `Node::search_recent_limited` with a 201-hit budget so one extra match establishes
-truncation without accumulating every conversation's matching plaintext. The
-current conversation's 2,000-entry projection is processed separately; retained
-metadata scans still cover eligible conversations. Context returns at most 51 rows and 1 MiB;
-a response exceeding its byte budget becomes unavailable with no rows. Limits
-do not establish complete retained-history coverage. Keys, raw errors and
-message content do not enter diagnostics.
+truncation. The capped search retains at most 201 results during collection
+and skips text matching if a row cannot beat the current cutoff. Equal
+timestamps preserve conversation traversal and reverse canonical order.
+Each eligible conversation still resolves its own history window. Context
+returns at most 51 rows and 1 MiB. A response exceeding its byte budget becomes
+unavailable with no rows. Keys, raw errors and message content do not enter
+diagnostics.
 
 The desktop SearchDialog uses these owner-scoped commands through typed adapters.
 Each selected result retains its namespace and canonical message ID. Exact
@@ -1529,6 +1577,30 @@ reference needs an explicit account association before opening an account view;
 the raw device ID is never substituted for an account ID. Search results expose
 their recent-window coverage and truncation. Owner/runtime replacement and
 superseded requests invalidate pending results and context.
+
+#### Search implementation and review
+
+[SearchDialog](../frontend/src/features/chat/SearchDialog.tsx) calls
+[owner-scoped IPC](../src-tauri/src/owner_commands/search.rs), which dispatches
+blocking work through runtime admission to [core search](../crates/mesh-talk-core/src/node/search.rs).
+The [history dialog](../frontend/src/features/chat/ConversationHistoryDialog.tsx)
+has a separate per-conversation path. Its
+[explicit remote-history paging](channel-history-paging-ui.md) does not expand
+the global search query's coverage by itself.
+
+Global search normalizes the query and compares lowercased substrings in the
+existing history projection. It maintains no separate full-text index or
+index rebuild job. The host rejects an overlong query before scheduling and
+serializes a bounded newest-first result prefix. The UI discards an obsolete
+response, but that discard does not cancel a core scan already admitted.
+
+Keep canonical identities and visibility checks in the history owner. Before
+changing the implementation, measure metadata traversal, body reads and query
+latency with short and long retained histories and rapid query replacement.
+If metadata traversal dominates, first test bounded history selection with
+the same coverage and ordering. A separate full-text index would require
+evidence of user need and tests for protected content, recall, expiry,
+deletion, rebuild and write amplification.
 
 ### Storage replay and query budgets
 
@@ -1590,6 +1662,12 @@ corruption error; it must not produce an empty successful page, silently omit a
 requested message or leave a synchronous query spinning without progress.
 Authoritative signed events and plaintext sidecars remain untouched by this
 derived-index failure boundary.
+
+Full history generation commits candidate metadata in the same bounded pages
+used for header discovery, up to 128 candidates per transaction. Each page
+preserves lifecycle checks and candidate precedence. Rank publication retains
+its existing readiness gate, so an interrupted construction can be rebuilt
+without exposing partial history. Reopening unchanged history reuses ready ranks.
 
 Event repository schema v2 admits the signed `ChannelMetadata` event added by
 channel protocol v5. The only v1 schema change relaxes the event-kind constraint
@@ -2025,8 +2103,10 @@ explicitly when full, and a too-small demand read leaves the first signal queued
 Call signaling remains best-effort and adds no wire acknowledgement or replay.
 Desktop startup, the node CLI and the dedicated integration host select this
 mode. The desktop publishes one scoped wake until its pending page is ACKed;
-state, channel, profile and file-progress invalidations share that gate. It
-retains only page cursor/token metadata and at most 64 current progress hints.
+state, channel, profile and file-progress invalidations share that gate. The
+gate retains only page cursor/token metadata and at most 64 current progress
+hints. Roster-only changes use a coalesced, installation-scoped observation
+event and do not reserve a durable reception page.
 Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
 restarts on a new revision or renderer replacement. Alongside receipt and call
 budgets, their conservative serialization charge remains below 64 MiB. Backend current-value payloads use the encrypted participant indexes; Node warm
@@ -2815,6 +2895,49 @@ bot devices through ordinary signed group invitation acceptance. A send-only
 client grant does not remove the hosting member's decryption capability. Bot
 badges and authenticated delegated-send attribution are later wire extensions;
 existing participants see an ordinary signed account/device author.
+
+## Operational logging and diagnostic exports
+
+The [desktop logger](../src-tauri/src/logger/mod.rs) is installed during
+[Tauri setup](../src-tauri/src/lib.rs). Rust producers use the `log` facade.
+The desktop writes local-time records to `logs/mesh-talk.log` under its
+configured data root, normally `~/.mesh-talk`. Debug builds also write to
+stdout. Debug builds admit Debug and higher by default, release builds Warn
+and higher. Graphics, startup and selected core targets also admit Info.
+The log stream is process-wide and can contain earlier session context.
+
+The application uses the file defaults of `tauri-plugin-log` 2.10.2, pinned
+in [Cargo.lock](../Cargo.lock). The plugin opens the active file in append
+mode and rotates around its 40,000-byte threshold with `KeepOne`, replacing
+the active file rather than preserving an archive at each rollover. The
+application also attempts to delete `.log` files older than seven days during
+logger initialization. This sweep is best effort and startup-driven. Seven
+days therefore describes the cleanup cutoff, not available diagnostic history.
+
+Diagnostics uses [typed commands](../frontend/src/lib/api/diagnostics.ts)
+to read or export up to the last 64 KiB of the current file. The host seeks
+and reads on a blocking worker. It returns an empty string if the active
+file is absent and decodes lossily if the byte boundary splits a character.
+[Diagnostics authority](../src-tauri/src/diagnostics.rs) checks the originating
+session and lock state before publishing a read or admitting a save. Copy
+and Save expose raw log text. Review it before sharing. See
+[diagnostic exposure and authority](privacy-controls.md#reducing-address-and-identity-exposure).
+
+With `MESH_TALK_TRACE_WORK=1`, the desktop also counts registered IPC dispatch
+attempts by command name, with at most 256 names per window and a drop counter.
+Handled requests drive emission after a five-second window. The observer
+starts no periodic worker and records no arguments. The
+[headless CLI](../crates/mesh-talk-core/src/bin/mesh-talk-node.rs) installs a
+separate opt-in sink for selected SQL work records. It does not share the
+desktop file sink. Operational logs and these counters serve diagnostics.
+The [signed event log](#3-event-log--sync-eventlog) serves durable protocol
+reconciliation, and the history projection serves chat views.
+
+Retain bounded on-demand log export. Verify rollover and failure behavior on
+packaged hosts before changing rotation, buffering or severity. If useful
+startup context is consistently lost, measure rollover frequency and
+idle writes before choosing a retention budget. If reports need sharing
+without manual review, define and test a separate redacted export mode.
 
 ## 6. Binaries
 

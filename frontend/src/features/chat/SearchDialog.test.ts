@@ -315,7 +315,7 @@ it("does not reinterpret an unbound legacy device as an account", async () => {
   }
 });
 
-it("keeps the latest query when an older search completes afterward", async () => {
+it("discards the older result before the latest queued search completes", async () => {
   vi.useFakeTimers();
   const container = document.createElement("div");
   const root = createRoot(container);
@@ -361,14 +361,13 @@ it("keeps the latest query when an older search completes afterward", async () =
     await act(async () => vi.advanceTimersByTimeAsync(250));
     await act(async () => input.onChange?.({ target: { value: "second" } }));
     await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(second).toBeUndefined();
+    await act(async () => first(response("outdated")));
+    expect(container.querySelector('[data-testid="search-result"]')).toBeNull();
     await act(async () => second(response("latest")));
     expect(
       container.querySelector('[data-testid="search-result"]')?.textContent,
     ).toContain("latest");
-    await act(async () => first(response("outdated")));
-    expect(
-      container.querySelector('[data-testid="search-result"]')?.textContent,
-    ).not.toContain("outdated");
   } finally {
     await act(async () => root.unmount());
     vi.useRealTimers();
@@ -414,6 +413,59 @@ it.each(["missing", "recalled", "expired", "wrong-namespace"])(
       expect(container.querySelector('[role="alert"]')?.textContent).toContain(
         "no longer available",
       );
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  },
+);
+
+it.each([false, true])(
+  "retains one native search with only the current dialog's latest input (closed: %s)",
+  async (close) => {
+    vi.useFakeTimers();
+    api.searchRecent.mockClear();
+    type Response = Awaited<ReturnType<typeof api.searchRecent>>;
+    let finish!: (result: Response) => void;
+    api.searchRecent.mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(createElement(SearchDialog)));
+      await act(async () => dialog.onOpenChange?.(true));
+      for (const value of ["first", "discarded", "latest"]) {
+        await act(async () => input.onChange?.({ target: { value } }));
+        await act(async () => vi.advanceTimersByTimeAsync(250));
+      }
+      expect(api.searchRecent.mock.calls).toEqual([["host", "first"]]);
+
+      if (close) await act(async () => dialog.onOpenChange?.(false));
+      await act(async () =>
+        finish({
+          hits: [],
+          coverage: {
+            scope: "recent-window",
+            per_conversation_limit: 500,
+            result_limit: 200,
+            truncated: false,
+          },
+        }),
+      );
+      expect(api.searchRecent.mock.calls).toEqual(
+        close
+          ? [["host", "first"]]
+          : [
+              ["host", "first"],
+              ["host", "latest"],
+            ],
+      );
+      expect(
+        container.querySelectorAll('[data-testid="search-result"]'),
+      ).toHaveLength(close ? 0 : 3);
     } finally {
       await act(async () => root.unmount());
       vi.useRealTimers();

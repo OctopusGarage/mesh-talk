@@ -894,13 +894,12 @@ impl NodeRuntime {
             post_office_enabled,
             candidate_source,
         } = config;
+        let observe_phase = super::work_observation::startup_phase_clock("profile_runtime");
         let host_owner = account_id.to_owned();
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
 
-        // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
-        // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
-        // a tokio worker; the result is identical (same files, same ordering).
+        // Keep keystore derivation off async workers and under the profile lease.
         let (identity, account, lease) = {
             let profile_dir = dir.clone();
             let permit = startup_work.admit().expect("startup root admitted");
@@ -925,16 +924,37 @@ impl NodeRuntime {
                         }
                     };
                     lease.validate_identity_sources(&identity_path)?;
-                    let identity = keystore::load_or_create(&identity_path, &password)
-                        .map_err(|e| RuntimeError::Open(e.into()))?;
-                    let account = account_keystore::load_or_create(&account_path, &password)
-                        .map_err(|e| RuntimeError::Open(e.into()))?;
+                    let (identity, account) = if identity_path.is_file() && account_path.is_file() {
+                        // Existing sources are read independently. Join both reads before
+                        // returning either error so the lease stays held until they finish.
+                        let (identity, account) = std::thread::scope(|scope| {
+                            let account =
+                                scope.spawn(|| account_keystore::load(&account_path, &password));
+                            let identity = keystore::load(&identity_path, &password);
+                            (identity, account.join())
+                        });
+                        let account =
+                            account.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                        (
+                            identity.map_err(|error| RuntimeError::Open(error.into()))?,
+                            account.map_err(|error| RuntimeError::Open(error.into()))?,
+                        )
+                    } else {
+                        // A first startup must validate the device identity before it
+                        // creates an account keystore.
+                        let identity = keystore::load_or_create(&identity_path, &password)
+                            .map_err(|error| RuntimeError::Open(error.into()))?;
+                        let account = account_keystore::load_or_create(&account_path, &password)
+                            .map_err(|error| RuntimeError::Open(error.into()))?;
+                        (identity, account)
+                    };
                     Ok::<_, RuntimeError>((identity, account, lease))
                 })
                 .await
                 .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
                 .into_inner()?
         };
+        observe_phase("keystores_unlocked");
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
         observe_identity(RuntimeIdentity {
@@ -945,6 +965,7 @@ impl NodeRuntime {
         // Dual-stack TCP listener (IPv6 + IPv4-mapped, falling back to IPv4) so the node is
         // reachable over IPv6/link-local too; OS-assigned port (0).
         let listener = super::privacy_routes::stable_listener(&dir).await?;
+        observe_phase("listener_bound");
         let tcp_port = listener.local_addr()?.port();
 
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
@@ -988,6 +1009,7 @@ impl NodeRuntime {
                             &sent_log,
                             &password,
                         )?;
+                    observe_phase("encrypted_database_opened");
                     // Scoped children finish before this owner can return or unwind.
                     // Both results are joined before either failure is propagated.
                     let (node, names) = std::thread::scope(|scope| {
@@ -1018,6 +1040,7 @@ impl NodeRuntime {
                                 },
                                 targets,
                             )?;
+                            observe_phase("business_node_opened");
                             if node.account_profile(&node.account_id())?.is_none()
                                 && node.linked_devices().len() == 1
                             {
@@ -1038,6 +1061,7 @@ impl NodeRuntime {
                 .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
                 .into_inner()?
         };
+        observe_phase("profile_opened");
         node.set_post_office_permissions(
             network.post_office_send_enabled,
             network.post_office_receive_enabled,
@@ -1071,6 +1095,7 @@ impl NodeRuntime {
                 })?
                 .into_inner()?;
         }
+        observe_phase("privacy_configured");
         visibility
             .set_public(!node.privacy_snapshot().invisible)
             .await;

@@ -731,13 +731,14 @@ mod tests {
         .unwrap();
         let receipt = *desktop.borrow();
         assert_eq!(
-            receipt.state,
-            pack.state.wrapping_add(1),
-            "read receipts remain broad even after narrow library changes"
+            receipt.read_receipts,
+            pack.read_receipts.wrapping_add(1),
+            "read receipts must wake their scoped desktop consumers"
         );
+        assert_eq!(receipt.state, pack.state);
         assert_eq!(
             receipt.documents, pack.documents,
-            "a later broad publication must not erase coalesced document evidence"
+            "receipt publication must preserve coalesced document evidence"
         );
         assert_eq!(receipt.sync_status, pack.sync_status);
         let legacy_receipt = *ui.borrow();

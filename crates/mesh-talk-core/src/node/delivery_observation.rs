@@ -4,7 +4,7 @@ use super::{
     Node,
     delivery_store::{DeliveryDestination, DeliveryStatus, DeliveryStore},
 };
-use crate::eventlog::EventId;
+use crate::{eventlog::EventId, identity::device::PublicIdentity};
 use serde::Serialize;
 use std::{collections::BTreeMap, time::Instant};
 
@@ -36,6 +36,21 @@ pub struct DeliveryObservation {
     pub reason: Option<DeliveryRecoveryReason>,
 }
 
+/// Historical, exact-envelope custody, separate from recipient delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryCustody {
+    PostOffice,
+    RecipientRegisteredOffice,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct CustodyEvidence {
+    original: EventId,
+    device: PublicIdentity,
+    relay: PublicIdentity,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct AttemptToken {
     pub(super) logical: EventId,
@@ -55,6 +70,7 @@ struct Entry {
 #[derive(Default)]
 pub(super) struct DeliveryObservations {
     entries: BTreeMap<EventId, Entry>,
+    custody: BTreeMap<EventId, (Instant, Vec<CustodyEvidence>)>,
     generation: u64,
     serial: u64,
 }
@@ -125,11 +141,11 @@ impl DeliveryObservations {
             1
         });
         self.serial = next;
-        if let Some(entry) = self
-            .entries
-            .get_mut(&token.logical)
-            .filter(|e| e.token == token && token.generation == generation)
-        {
+        if let Some(entry) = self.entries.get_mut(&token.logical).filter(|e| {
+            e.token == token
+                && token.generation == generation
+                && e.kind == DeliveryObservationKind::Attempting
+        }) {
             entry.kind = DeliveryObservationKind::RetryScheduled;
             entry.reason = reason;
             entry.observed = now;
@@ -169,10 +185,38 @@ impl DeliveryObservations {
     pub(super) fn retain(&mut self, mut eligible: impl FnMut(EventId, EventId) -> bool) {
         self.entries
             .retain(|id, entry| eligible(*id, entry.token.destination));
+        self.custody.retain(|id, (_, facts)| {
+            facts.retain(|fact| eligible(*id, fact.original));
+            !facts.is_empty()
+        });
+    }
+
+    fn remember_custody(&mut self, id: EventId, fact: CustodyEvidence, now: Instant) -> bool {
+        if !self.custody.contains_key(&id)
+            && self.custody.len() >= CAPACITY
+            && let Some(oldest) = self
+                .custody
+                .iter()
+                .min_by_key(|(_, (observed, _))| *observed)
+                .map(|(id, _)| *id)
+        {
+            self.custody.remove(&oldest);
+        }
+        let (observed, facts) = self.custody.entry(id).or_insert_with(|| (now, Vec::new()));
+        if facts.contains(&fact) {
+            return false;
+        }
+        if facts.len() == 2 {
+            facts.remove(0);
+        }
+        *observed = now;
+        facts.push(fact);
+        true
     }
 
     pub(super) fn clear(&mut self) {
         self.entries.clear();
+        self.custody.clear();
     }
 }
 
@@ -269,6 +313,12 @@ impl Node {
             .generation
             .load(std::sync::atomic::Ordering::SeqCst);
         if observations.finished_with_reason(token, generation, std::time::Instant::now(), reason) {
+            crate::transport::diagnostics::record_message(|metrics| {
+                metrics.retries_scheduled = metrics.retries_scheduled.saturating_add(1);
+                if reason == Some(DeliveryRecoveryReason::AttemptTimedOut) {
+                    metrics.attempt_timeouts = metrics.attempt_timeouts.saturating_add(1);
+                }
+            });
             self.delivery_status_notify.notify_waiters();
         }
     }
@@ -286,6 +336,148 @@ impl Node {
         );
         observations
             .retain(|logical, event| self.observed_destination_current(&store, logical, event));
+    }
+
+    pub(super) fn observe_exact_relay_custody(
+        &self,
+        destination: &DeliveryDestination,
+        relay: &PublicIdentity,
+        generation: u64,
+    ) {
+        if !self.relay_send_allowed(relay) {
+            return;
+        }
+        let store = self.delivery.lock().expect("delivery lock not poisoned");
+        let Some(logical) = store.logical_for_original(destination.event.id) else {
+            return;
+        };
+        if self.runtime_work.is_closed()
+            || !self.observed_destination_current(&store, logical, destination.event.id)
+        {
+            return;
+        }
+        let mut observations = self
+            .delivery_observations
+            .lock()
+            .expect("delivery observations lock not poisoned");
+        let current = self
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        observations.sync_generation(current);
+        if current == generation
+            && observations.remember_custody(
+                logical,
+                CustodyEvidence {
+                    original: destination.event.id,
+                    device: destination.device.clone(),
+                    relay: relay.clone(),
+                },
+                Instant::now(),
+            )
+        {
+            self.delivery_status_notify.notify_waiters();
+        }
+    }
+
+    /// Project live-session custody for the authorized outgoing account scope.
+    pub fn account_delivery_custody(
+        &self,
+        peer: &str,
+        ids: &[EventId],
+    ) -> BTreeMap<EventId, DeliveryCustody> {
+        if peer == self.account_id() || self.runtime_work.is_closed() {
+            return BTreeMap::new();
+        }
+        let generation = self
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let facts: Vec<_> = {
+            let conv = super::conversation::account_conversation_id(&self.account_id(), peer);
+            let store = self.delivery.lock().expect("delivery lock not poisoned");
+            let mut observations = self
+                .delivery_observations
+                .lock()
+                .expect("delivery observations lock not poisoned");
+            if generation
+                != self
+                    .privacy
+                    .generation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return BTreeMap::new();
+            }
+            observations.sync_generation(generation);
+            ids.iter()
+                .take(CAPACITY)
+                .filter_map(|id| {
+                    if store.status_in(conv, *id) != Some(DeliveryStatus::Awaiting) {
+                        return None;
+                    }
+                    let (_, evidence) = observations.custody.get(id)?;
+                    let evidence: Vec<_> = evidence
+                        .iter()
+                        .filter(|fact| {
+                            self.observed_destination_current(&store, *id, fact.original)
+                        })
+                        .cloned()
+                        .collect();
+                    (!evidence.is_empty()).then_some((*id, evidence))
+                })
+                .collect()
+        };
+        if facts.is_empty() {
+            return BTreeMap::new();
+        }
+        let roster = self.roster.lock().expect("roster lock not poisoned");
+        let now = Instant::now();
+        let unix = super::discovery_origin::unix_now();
+        let projection = facts
+            .into_iter()
+            .map(|(id, facts)| {
+                let registered = facts.iter().any(|fact| {
+                    roster
+                        .get(&fact.device.user_id())
+                        .filter(|record| {
+                            record.public == fact.device
+                                && record.account_id.as_deref() == Some(peer)
+                        })
+                        .is_some_and(|peer| {
+                            let mut origins =
+                                peer.presence_routes(now).filter_map(|(route, _, _)| {
+                                    route
+                                        .registration_origin
+                                        .as_ref()
+                                        .filter(|origin| origin.expires_at_secs() > unix)
+                                });
+                            origins
+                                .next()
+                                .is_some_and(|origin| origin.is_from(&fact.relay))
+                                && origins.all(|origin| origin.is_from(&fact.relay))
+                        })
+                });
+                (
+                    id,
+                    if registered {
+                        DeliveryCustody::RecipientRegisteredOffice
+                    } else {
+                        DeliveryCustody::PostOffice
+                    },
+                )
+            })
+            .collect();
+        if generation
+            == self
+                .privacy
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+            && !self.runtime_work.is_closed()
+        {
+            projection
+        } else {
+            BTreeMap::new()
+        }
     }
 
     /// Additive, bounded projection of local scheduling facts, authorized by the

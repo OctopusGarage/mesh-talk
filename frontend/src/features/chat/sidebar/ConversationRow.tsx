@@ -1,5 +1,13 @@
+import { useSettings } from "@/store/settings";
 import { useState } from "react";
-import { Bookmark, MoreHorizontal, Pencil, Pin, PinOff } from "lucide-react";
+import {
+  BellOff,
+  Bookmark,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -57,19 +65,23 @@ export function ConversationRow({
   listSize: number;
 }) {
   const { t } = useTranslation();
+  const muted = useSettings(
+    (s) => conv.kind === "channel" && s.mutedGroups.includes(conv.id),
+  );
+  const [muteError, setMuteError] = useState(false);
   const newAnnouncement = useNewGroupAnnouncement(channel ? conv.id : "");
   const packs = usePacks((s) => s.packs);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const active = useChat((s) => s.active);
   const unread = useChat((s) => s.unread[convKey(conv)] ?? 0);
-  const mentioned = useChat(
+  const mentionCount = useChat(
     (s) =>
-      conv.kind === "channel" &&
-      Object.values(s.ledger[convKey(conv)] ?? {}).some(
+      Object.values(s.ledger[convKey(conv)] ?? {}).filter(
         (entry) => !entry.seen && !entry.suppressed && entry.mentioned,
-      ),
+      ).length,
   );
+  const mentioned = conv.kind === "channel" && mentionCount > 0;
   const history = useChat((s) => s.messages[convKey(conv)]);
   const open = useChat((s) => s.open);
   const isActive = active != null && convKey(active) === convKey(conv);
@@ -141,6 +153,21 @@ export function ConversationRow({
         )}
         {t(pinned ? "sidebar.unpin" : "sidebar.pin")}
       </ContextMenuItem>
+      {channel && (
+        <ContextMenuItem
+          onSelect={() => {
+            setMuteError(false);
+            void useSettings
+              .getState()
+              .setGroupMuted(conv.id, !muted)
+              .catch(() => setMuteError(true));
+          }}
+        >
+          {muted
+            ? t("sidebar.unmuteGroup", "Unmute group notifications")
+            : t("sidebar.muteGroup", "Mute group notifications")}
+        </ContextMenuItem>
+      )}
       {channel && onHide && (
         <ContextMenuItem
           onSelect={() => {
@@ -264,9 +291,26 @@ export function ConversationRow({
           </div>
         </div>
       </button>
-      {unread > 0 && (
+      {muted && (
+        <BellOff
+          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+          aria-label={t("sidebar.groupMuted")}
+        />
+      )}
+      {muteError && (
+        <span role="alert">
+          {t("sidebar.muteFailed", "Could not save notification preference")}
+        </span>
+      )}
+      {unread > 0 && muted && !mentioned && (
+        <span
+          aria-label={t("sidebar.mutedUnread", { count: unread })}
+          className="h-2 w-2 rounded-full bg-muted-foreground"
+        />
+      )}
+      {unread > 0 && (!muted || mentioned) && (
         <Badge className="bg-signal font-mono text-[11px] text-primary-foreground group-hover:opacity-0 group-focus-within:opacity-0">
-          {unread}
+          {muted ? Math.min(unread, mentionCount) : unread}
         </Badge>
       )}
       {!personal && (

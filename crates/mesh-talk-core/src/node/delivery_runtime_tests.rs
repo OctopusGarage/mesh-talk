@@ -9,6 +9,63 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[tokio::test]
+async fn empty_delivery_worker_parks_until_new_durable_demand() {
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let sender = Node::open_with_account(
+        DeviceIdentity::generate(),
+        Account::generate(),
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        dm,
+        channel,
+        file,
+        &directory.path().join("messages.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    fn observe_snapshot(node: &Node) -> tokio::sync::oneshot::Receiver<()> {
+        let (observed, snapshot) = tokio::sync::oneshot::channel();
+        *node.delivery_snapshot_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = observed.send(());
+        }));
+        snapshot
+    }
+
+    let initial = observe_snapshot(&sender);
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(2), initial)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = observe_snapshot(&sender);
+    let parked = tokio::time::timeout(Duration::from_millis(750), &mut next).await;
+
+    // Publish through the exact edge used by new durable delivery intents.
+    let woke = if parked.is_err() {
+        sender.note_delivery_demand();
+        Some(tokio::time::timeout(Duration::from_secs(2), next).await)
+    } else {
+        None
+    };
+    worker.abort();
+    let _ = worker.await;
+    sender.runtime_work.close();
+    sender.runtime_work.drain().await;
+    sender.close_profile().unwrap();
+
+    assert!(parked.is_err(), "empty worker must not run the 500ms scan");
+    woke.unwrap()
+        .expect("new work wakes delivery without waiting for idle repair")
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt() {
     file_manifest_requester_reception(false).await;
@@ -206,16 +263,19 @@ async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances()
         }
     });
     let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let empty = receiver.reconcile_delivery_peer(&source_proof).await;
+        let empty = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         let target = receiver.account_id();
         let id = source
             .enqueue_to_account(&target, b"new data after a quiet pull", None)
             .await
             .unwrap();
         assert!(received.try_recv().is_err());
-        let advanced = receiver.reconcile_delivery_peer(&source_proof).await;
-        let message = received.try_recv().unwrap();
-        let quiet = receiver.reconcile_delivery_peer(&source_proof).await;
+        let advanced = settle_delivery_pull_fixture(&receiver, &source_proof).await;
+        let message = received
+            .recv()
+            .await
+            .expect("the admitted raw message must finish its real reception owner");
+        let quiet = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         let relay = DeviceIdentity::generate();
         let relay_proof = Announce::new_post_office_with_account(
             &relay,
@@ -233,7 +293,7 @@ async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances()
         // A clean direct replay cannot relabel that skipped relay as quiet.
         receiver.record_relay_attempt(&relay_proof.public(), false);
         assert!(!receiver.relay_retry_due(&relay_proof.public()));
-        let cooling = receiver.reconcile_delivery_peer(&source_proof).await;
+        let cooling = settle_delivery_pull_fixture(&receiver, &source_proof).await;
         (empty, advanced, quiet, cooling, id, message.message_id)
     })
     .await;
@@ -5804,7 +5864,7 @@ async fn sync_delivery_test_stage(
         source.emit_new_messages(conversation);
         timing.finish();
     };
-    tokio::join!(accept, send);
+    tokio::join!(Box::pin(accept), Box::pin(send));
     timing.finish();
 }
 
@@ -6591,6 +6651,50 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
     );
     assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    let account = bob_account.account_id();
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::PostOffice)
+    );
+    assert!(
+        a.account_delivery_custody(&"11".repeat(16), &[id])
+            .is_empty()
+    );
+    let office = DeviceIdentity::from_secret_bytes(po_secret.0, po_secret.1);
+    let origin = super::RegistrationOrigin::new(
+        &office,
+        "Relay",
+        super::OriginConsent::new(
+            &bob,
+            &office.public(),
+            super::discovery_origin::unix_now() + 10,
+        ),
+    )
+    .unwrap();
+    let endpoint = (Ipv4Addr::LOCALHOST, proof.tcp_port).into();
+    {
+        let mut roster = a.roster.lock().unwrap();
+        roster.update_relayed(&bp, endpoint, &a.user_id());
+        roster.set_directory_expiry(
+            &bp.user_id,
+            endpoint,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+            origin.expires_at_secs(),
+        );
+        roster.set_registration_origin(&bp.user_id, endpoint, Some(origin));
+    }
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::RecipientRegisteredOffice)
+    );
+    a.roster
+        .lock()
+        .unwrap()
+        .set_registration_origin(&bp.user_id, endpoint, None);
+    assert_eq!(
+        a.account_delivery_custody(&account, &[id]).get(&id),
+        Some(&super::DeliveryCustody::PostOffice)
+    );
     task.abort();
     let _ = task.await;
 }
@@ -6717,6 +6821,15 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 
 #[tokio::test]
 async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
+    assert_relay_file_fallback(false).await;
+}
+
+#[tokio::test]
+async fn relay_completes_attachment_after_direct_prefix() {
+    assert_relay_file_fallback(true).await;
+}
+
+async fn assert_relay_file_fallback(with_direct_prefix: bool) {
     let mut timing = super::delivery_runtime::TestTiming::new("relay-file-fixture-setup");
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -6726,7 +6839,15 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     let bob = DeviceIdentity::generate();
     let bob_account = Account::generate();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let direct_listener = if with_direct_prefix {
+        Some(TcpListener::bind("127.0.0.1:0").await.unwrap())
+    } else {
+        None
+    };
+    let direct_port = direct_listener
+        .as_ref()
+        .map_or(1, |listener| listener.local_addr().unwrap().port());
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", direct_port);
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
@@ -6834,6 +6955,40 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     recipient_task.abort();
     let _ = recipient_task.await;
 
+    if let Some(listener) = direct_listener {
+        let address = listener.local_addr().unwrap();
+        let source = Arc::clone(&a);
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let source = Arc::clone(&source);
+                connections.spawn(async move {
+                    if let Ok(channel) = source.privacy_accept(stream).await {
+                        source.serve_connection(channel).await;
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        });
+        let author = crate::eventlog::Author::from_ed25519(ap.public().ed25519_pub);
+        let mut channel = b.privacy_sync_dial(address, &ap.public()).await.unwrap();
+        let first = super::session::request_signed_chunk(&mut channel, file, author, 0)
+            .await
+            .unwrap()
+            .expect("source serves the signed prefix over direct TCP");
+        let store = b.sync_store(channel.peer_identity());
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(
+            &mut *store.lock().unwrap(),
+            first,
+        )
+        .unwrap();
+        drop(channel);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(b.file_progress(file).unwrap().unwrap().done, 1);
+    }
+
     // A stale preferred relay must not strand consented chunks while another
     // authenticated relay on this LAN is accepting mailbox rounds.
     let offline_relay = DeviceIdentity::generate();
@@ -6930,10 +7085,12 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
 #[ignore = "requires installed mac2015 post office on the same LAN"]
 async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
     let service = std::env::var("MESH_TALK_E2E_MAC2015_SERVICE").ok();
-    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
-        "MESH_TALK_E2E_MAC2015_RELAY_ID",
-        "mac2015",
-        MacRelayService::parse(service.as_deref()).restart_command(),
+    Box::pin(
+        installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+            "MESH_TALK_E2E_MAC2015_RELAY_ID",
+            "mac2015",
+            MacRelayService::parse(service.as_deref()).restart_command(),
+        ),
     )
     .await;
 }
@@ -6989,11 +7146,11 @@ fn mac_relay_service_selector_preserves_legacy_and_requires_explicit_system() {
 #[tokio::test]
 #[ignore = "requires installed windows10 post office on the same LAN"]
 async fn windows10_post_office_delivers_file_bytes_after_both_peers_go_offline() {
-    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+    Box::pin(installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         "MESH_TALK_E2E_WINDOWS10_RELAY_ID",
         "windows10",
         "powershell -NoProfile -Command \"Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice\"",
-    )
+    ))
     .await;
 }
 
@@ -10324,27 +10481,60 @@ async fn automatic_text_and_sticker_delivery_survives_established_recipient_cold
     recipient_runtime.as_mut().unwrap().launch();
     let outcome = std::panic::AssertUnwindSafe(async {
         // Establish both ratchet directions before closing the real receiver.
-        tokio::time::timeout(Duration::from_secs(8), async {
+        // Fixed labels locate a failed exchange without exposing message IDs
+        // or payloads. All five exchanges retain their original shared budget.
+        let mut establishment_index = 0;
+        let mut establishment_phase = "enqueue";
+        let mut establishment_id = None;
+        let established = tokio::time::timeout(Duration::from_secs(8), async {
             let first = sender.enqueue_to_account(&recipient_account_id, b"before restart", None).await.unwrap();
+            establishment_id = Some(first);
+            establishment_phase = "receive";
             let received = recipient_received.recv().await.unwrap();
             assert_eq!(received.message_id, Some(first));
             assert_eq!(received.text, b"before restart");
+            establishment_phase = "receipt";
             wait_for_durable_delivery(&sender, first).await;
+            establishment_index = 1;
+            establishment_phase = "enqueue";
+            establishment_id = None;
             let reply = recipient_node.as_ref().unwrap().enqueue_to_account(&sender.account_id(), b"established reply", None).await.unwrap();
+            establishment_id = Some(reply);
+            establishment_phase = "receive";
             let received = sender_received.recv().await.unwrap();
             assert_eq!(received.message_id, Some(reply));
             assert_eq!(received.text, b"established reply");
+            establishment_phase = "receipt";
             wait_for_durable_delivery(recipient_node.as_ref().unwrap(), reply).await;
             // Native CI confirms three more sender messages after the reply:
             // persist the new receiving chain before the receiver goes cold.
-            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+            for (index, body) in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()].into_iter().enumerate() {
+                establishment_index = index + 2;
+                establishment_phase = "enqueue";
+                establishment_id = None;
                 let id = sender.enqueue_to_account(&recipient_account_id, &body, None).await.unwrap();
+                establishment_id = Some(id);
+                establishment_phase = "receive";
                 let received = recipient_received.recv().await.unwrap();
                 assert_eq!(received.message_id, Some(id));
                 assert_eq!(received.text, body);
+                establishment_phase = "receipt";
                 wait_for_durable_delivery(&sender, id).await;
             }
-        }).await.expect("automatic bidirectional delivery must establish the persisted session");
+        }).await;
+        let establishment_status = if established.is_err() {
+            establishment_id.and_then(|id| {
+                let source = if establishment_index == 1 {
+                    recipient_node.as_ref().unwrap()
+                } else {
+                    &sender
+                };
+                source.delivery_status(id)
+            })
+        } else {
+            None
+        };
+        assert!(established.is_ok(), "automatic bidirectional delivery must establish the persisted session: exchange={establishment_index}, phase={establishment_phase}, enqueued={}, delivery={establishment_status:?}", establishment_id.is_some());
 
         recipient_runtime.take().unwrap().stop().await;
         drop(recipient_node.take());
@@ -11580,6 +11770,10 @@ async fn delayed_route_delivery_with_budget(
         Announce::new_with_account(&bob, &bob_account, "Bob", old.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
+    if recipient_inbound_only {
+        super::test_support::trace_sync_failures(&a, "slow sender");
+        super::test_support::trace_sync_failures(&b, "slow recipient");
+    }
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -11929,12 +12123,18 @@ async fn automatic_first_send_rechecks_receipts_after_early_empty_control_round(
     receipt_scope_progress_fixture(ReceiptScopeCase::EmptyReceiptsFirst).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_first_send_collects_receipt_while_early_receipt_probe_is_held() {
+    receipt_scope_progress_fixture(ReceiptScopeCase::HeldEarlyReceipts).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReceiptScopeCase {
     HeldMessages,
     HeldManifest,
     HeldReceipts,
     EmptyReceiptsFirst,
+    HeldEarlyReceipts,
 }
 
 async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
@@ -11994,6 +12194,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
     let held_requests = Arc::new(AtomicUsize::new(0));
     let control_requests = Arc::new(AtomicUsize::new(0));
     let empty_controls = Arc::new(AtomicUsize::new(0));
+    let same_stream_followup = Arc::new(AtomicBool::new(false));
     let exact_have = Arc::new(AtomicUsize::new(0));
     let empty_ready = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -12002,6 +12203,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
     // never runs a delivery producer or makes a reverse connection.
     let mut recipient_host = IndependentPeerRuntime::start_multithreaded_with(
         recipient.clone(), recipient_listener, {
+            let same_stream_followup = same_stream_followup.clone();
             let armed = armed.clone(); let held_requests = held_requests.clone();
             let control_requests = control_requests.clone(); let release = release.clone(); let entered = entered.clone();
             let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
@@ -12012,6 +12214,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                         accepted = listener.accept() => {
                             let (stream, _) = accepted.unwrap();
                             let node = node.clone(); let armed = armed.clone();
+                            let same_stream_followup = same_stream_followup.clone();
                             let held_requests = held_requests.clone(); let control_requests = control_requests.clone();
                             let release = release.clone(); let entered = entered.clone();
                             let empty_controls = empty_controls.clone(); let exact_have = exact_have.clone(); let empty_ready = empty_ready.clone();
@@ -12020,6 +12223,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                 let Ok(mut channel) = node.privacy_accept(stream).await else { return; };
                                 let store = node.sync_store(channel.peer_identity());
                                 let Some(_reception) = node.request_reception_scope(&store, &channel) else { return; };
+                                let mut confirmed_original = false;
                                 while let Ok(bytes) = channel.recv().await {
                                     let scope = super::session::fingerprint_request_conversation(&bytes)
                                         .or_else(|| super::session::round_request_conversation(&bytes));
@@ -12033,9 +12237,24 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                             ready.await;
                                         }
                                     }
-                                    if scope == Some(control) { control_requests.fetch_add(1, Ordering::SeqCst); }
+                                    if scope == Some(control) {
+                                        control_requests.fetch_add(1, Ordering::SeqCst);
+                                        if active && confirmed_original {
+                                            same_stream_followup.store(true, Ordering::SeqCst);
+                                        }
+                                    }
+                                    if active && scope == Some(dm) && case == ReceiptScopeCase::HeldEarlyReceipts {
+                                        // Establish the independent early probe's real
+                                        // TCP hold before serving the original payload.
+                                        loop {
+                                            let ready = entered.notified(); tokio::pin!(ready); ready.as_mut().enable();
+                                            if held_requests.load(Ordering::SeqCst) > 0 { break; }
+                                            ready.await;
+                                        }
+                                    }
                                     if active && ((scope == Some(dm) && holds_messages)
-                                        || (scope == Some(control) && case == ReceiptScopeCase::HeldReceipts)) {
+                                        || (scope == Some(control) && (case == ReceiptScopeCase::HeldReceipts
+                                            || (case == ReceiptScopeCase::HeldEarlyReceipts && !confirmed_original)))) {
                                         held_requests.fetch_add(1, Ordering::SeqCst);
                                         entered.notify_waiters();
                                         // No store guard spans the injected wait.
@@ -12061,6 +12280,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
                                                 empty_ready.notify_waiters();
                                             }
                                             if have.is_some_and(|(scope, event)| scope == dm && node.log.lock().unwrap().get(&event).unwrap().is_some()) {
+                                                confirmed_original = true;
                                                 exact_have.fetch_add(1, Ordering::SeqCst);
                                             }
                                         }
@@ -12103,7 +12323,7 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
         let mut destination = message.destinations[0].clone();
         assert_eq!(destination.event.conversation_id, dm);
         let peer = sender.routing_peer(&recipient.user_id()).unwrap();
-        if case != ReceiptScopeCase::EmptyReceiptsFirst {
+        if !matches!(case, ReceiptScopeCase::EmptyReceiptsFirst | ReceiptScopeCase::HeldEarlyReceipts) {
             // Retain the original through real transport before holding any
             // history. Never fabricate or manually install its receipt.
             assert!(tokio::time::timeout(Duration::from_secs(30), sender.transfer_delivery_destination(
@@ -12181,14 +12401,24 @@ async fn receipt_scope_progress_fixture(case: ReceiptScopeCase) {
             assert!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().is_none());
         } else {
             let recovered = tokio::time::timeout(Duration::from_secs(3), async {
-                while sender.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                loop {
+                    let changed = sender.delivery_status_notify.notified(); tokio::pin!(changed); changed.as_mut().enable();
+                    if sender.delivery_status(id) == Some(DeliveryStatus::Delivered) { break; }
+                    changed.await;
                 }
             }).await;
             assert!(recovered.is_ok(), "a genuine queued recipient receipt must recover independently; control_requests={}", control_requests.load(Ordering::SeqCst));
             assert_eq!(sender.log.lock().unwrap().get(&receipt.destination.event.id).unwrap().unwrap(), receipt.destination.event);
+            if case == ReceiptScopeCase::HeldEarlyReceipts {
+                assert!(held_requests.load(Ordering::SeqCst) > 0);
+                assert!(exact_have.load(Ordering::SeqCst) > have_before);
+                assert!(same_stream_followup.load(Ordering::SeqCst),
+                    "the original's authenticated stream must collect its receipt before the early probe is released");
+            }
             if case == ReceiptScopeCase::EmptyReceiptsFirst {
                 assert_eq!(empty_controls.load(Ordering::SeqCst), 1);
+                assert!(same_stream_followup.load(Ordering::SeqCst),
+                    "the post-original receipt query must reuse the connection that proved Have");
                 assert!(control_requests.load(Ordering::SeqCst) >= controls_before + 2,
                     "a first empty control result must be followed by a bounded post-original receipt round");
             }
@@ -13690,8 +13920,8 @@ async fn authenticated_receipt_retirement(before_discovery: bool) {
     };
     let reconciling = async {
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let first = a.reconcile_delivery_peer(&bp).await;
-            let second = a.reconcile_delivery_peer(&bp).await;
+            let first = settle_delivery_pull_fixture(&a, &bp).await;
+            let second = settle_delivery_pull_fixture(&a, &bp).await;
             (first, second, pending().len(), opens.load(Ordering::SeqCst))
         })
         .await;
@@ -13905,4 +14135,19 @@ async fn authenticated_receipt_retirement_cancelled_delivery_does_not_qualify() 
         None,
         "receipt processing must not resurrect an erased/cancelled delivery"
     );
+}
+
+// Explicit pull fixtures own each bounded continuation themselves. Real runtime
+// acceptance tests retain their actual scheduling owners instead of using this.
+async fn settle_delivery_pull_fixture(
+    node: &Arc<Node>,
+    proof: &Announce,
+) -> super::delivery_runtime::Reconciliation {
+    loop {
+        let result = node.reconcile_delivery_peer(proof).await;
+        if result != super::delivery_runtime::Reconciliation::More {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }

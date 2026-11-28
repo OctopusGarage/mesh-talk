@@ -243,10 +243,11 @@ impl Node {
         conv: ConversationId,
     ) -> ProfilePublicationOutcome {
         let direct = async {
-            let delivered = self
-                .adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
-                .await
-                .is_some_and(|result| result.is_ok());
+            let delivered = Box::pin(
+                self.adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv)),
+            )
+            .await
+            .is_some_and(|result| result.is_ok());
             if delivered {
                 // Reconciliation can pull a newer sibling profile while pushing
                 // ours. Apply it before recording this publication as complete.

@@ -1,47 +1,17 @@
 # Repository Guidelines
 
-## Roadmap and task execution
+## Project decisions
 
-- Read the [development roadmap](docs/development-roadmap.md) before selecting
-  planned work. It owns the thirty-source consolidation, foundation scope,
-  priorities, task dependencies, phase acceptance, current claims and deferred
-  features; this file owns the execution rules. Existing guides retain authority
-  over product/security/resource contracts.
-- The planning change must merge through the existing PR/review/current-head
-  checks before product execution. Start the execution cycle from that accepted
-  `main` revision, beginning with F01, then select tasks with accepted relevant
-  inputs. A planning merge or an existing test file is not implementation or
-  acceptance evidence. Do not bypass gates or resume an unmerged planning
-  snapshot as though it were the accepted baseline.
-- Deliver the finite current-IM foundations and their integrated acceptance
-  before post-foundation features. Forum, PWA, marketplace, external SDK and other
-  roadmap-only directions require a recorded activation decision; do not build
-  their speculative infrastructure during foundation work. Verified urgent
-  security, data-loss or hard-freeze findings override ordinary order.
-- Before a claim, recheck the live tracker, existing branches/PRs and ownership.
-  Register one task owner, source/parent SHA, outcome, exact owned paths, accepted
-  inputs, shared-interface/integration owner, evidence and next action. Reuse
-  existing work without silently reassigning it. Keep one authoritative live
-  claim record and update state/evidence before releasing the claim.
-- Admit parallel mutations only with stable accepted inputs/interfaces,
-  independent path and policy ownership, a clear integration order and available
-  review/validation capacity. Do not start work expected to need reimplementation
-  when an upstream change merges. Separate files do not prove independence;
-  serialize uncertain shared contracts or limit preparation to read-only work.
-  Stop and reassess dependents when their accepted interface changes.
-- For coordinated parallel tasks, declare an integration branch, create children
-  from its accepted tip/parent, and merge reviewed, validated compatible results
-  back in dependency order before integrated acceptance and the main PR gates.
-  Preserve the [worktree lifecycle](#worktree-lifecycle); never sweep unrelated
-  changes or bypass preservation/cleanup rules.
-- Treat module extraction as a bounded change with a real existing consumer,
-  explicit policy/lifecycle/errors and recovery evidence. Measure selected
-  performance paths before and after; deliver regression protection and maintained
-  decisions with each slice. Retain working boundaries when no justified change
-  is needed. Unknown facts become bounded investigations, not assumed defects,
-  numerical targets, migrations or commitments to future features.
+Consult the [decision log](docs/decisions.md) when a task touches a prior design
+choice or revisits a recurring question. Add or update a concise entry when
+discussion, implementation or verification settles something that will affect
+future work.
 
 ## Reliability before implementation
+
+- For new events, subscriptions, timers and polling changes, consult the
+  [event-driven design guide](docs/event-driven-design.md) and
+  [scheduled work guide](docs/scheduled-work.md) before editing.
 
 - For background work, synchronization, storage, caching or UI-state changes, read
   [performance requirements](docs/performance-requirements.md). Identify the work
@@ -50,6 +20,9 @@
   gaps. Apply its [startup, idle and active-business checklist](docs/performance-requirements.md#apply-to-every-feature)
   to every affected phase, including return to idle after use. Extend its general
   rules when a confirmed defect reveals a new pattern.
+  Apply the [headless post-office checklist](docs/performance-requirements.md#headless-post-office-nodes)
+  to relay changes and register background work with the
+  [existing event or scheduling owner](docs/event-driven-design.md#register-relay-work-with-its-owner).
 
 - Before implementing, refactoring, fixing or reviewing code, read the
   [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
@@ -155,6 +128,13 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   module contracts, resource budgets and topology acceptance boundaries.
 
 ## Maintaining standards as requirements change
+
+- When changing production dependencies, bundled assets, compiler profiles or
+  installer settings, check [package size budgets](docs/updates.md#manual-package-size-budgets).
+  Compare download bytes against a baseline for the same platform, architecture
+  and installer format. Record installed footprint separately and explain each
+  meaningful increase. If a production package was unavailable, record that
+  evidence gap. Preserve native install, update and signature verification.
 
 - Before changing tests, fixtures, dependencies or workflows in ways that affect
   CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse

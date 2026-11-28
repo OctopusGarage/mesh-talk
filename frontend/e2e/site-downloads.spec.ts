@@ -133,6 +133,101 @@ test("Mac chip choice leads to a direct archive download and first-run dialog", 
   await expect(hero).toBeFocused();
 });
 
+test("Windows offers the published standalone EXE alongside the archive", async ({
+  page,
+}) => {
+  await setup(page, "Windows", "x86");
+  const fixture = release();
+  const filename = "mesh-talk-update_v9.8.7_windows_x86_64.nsis.exe";
+  for (const name of [filename, `${filename}.sig`]) {
+    fixture.assets.push({
+      name,
+      size: name.endsWith(".sig") ? 512 : 15_737_932,
+      state: "uploaded",
+      browser_download_url: `${root}/download/v9.8.7/${name}`,
+    });
+  }
+  await page.route(api, (route) =>
+    route.fulfill({
+      json: fixture,
+      headers: { "access-control-allow-origin": "*" },
+    }),
+  );
+  await page.goto(site);
+  const packages = page.locator('[data-packages="windows"]');
+  const exe = packages.getByRole("link", { name: /x64.*EXE/ });
+  const zip = packages.getByRole("link", { name: /x64.*ZIP/ });
+  await expect(exe).toHaveAttribute(
+    "href",
+    `${root}/download/v9.8.7/${filename}`,
+  );
+  await expect(zip).toHaveAttribute(
+    "href",
+    `${root}/download/v9.8.7/mesh-talk_v9.8.7_windows_x86_64.zip`,
+  );
+  await expect(packages.getByRole("link", { name: /ARM64.*EXE/ })).toHaveCount(
+    0,
+  );
+  const download = observePackageRequest(page);
+  await exe.click();
+  expect(await download).toBe(`${root}/download/v9.8.7/${filename}`);
+});
+
+for (const signedUpdater of [true, false]) {
+  test(`Linux offers individual installers and the full ZIP (updater=${signedUpdater})`, async ({
+    page,
+  }) => {
+    await setup(page, "Linux", "x86");
+    const fixture = release();
+    const prefix = "mesh-talk-installer_v9.8.7_linux_x86_64";
+    const image = signedUpdater
+      ? "mesh-talk-update_v9.8.7_linux_x86_64.AppImage"
+      : `${prefix}.AppImage`;
+    const formats = [
+      ["deb", `${prefix}.deb`],
+      ["rpm", `${prefix}.rpm`],
+      ["AppImage", image],
+    ];
+    for (const name of [
+      ...formats.map(([, name]) => name),
+      ...(signedUpdater ? [`${image}.sig`] : []),
+    ]) {
+      fixture.assets.push({
+        name,
+        state: "uploaded",
+        size: 12_345_678,
+        browser_download_url: `${root}/download/v9.8.7/${name}`,
+      });
+    }
+    await page.route(api, (route) =>
+      route.fulfill({
+        json: fixture,
+        headers: { "access-control-allow-origin": "*" },
+      }),
+    );
+    await page.goto(site);
+    const packages = page.locator('[data-packages="linux"]');
+    await expect(
+      packages.getByRole("link", { name: /x64.*ZIP/ }),
+    ).toBeVisible();
+    await expect(page.locator("[data-download-primary]")).toHaveAttribute(
+      "href",
+      "#download",
+    );
+    await expect(
+      packages.getByRole("link", { name: /ARM64.*AppImage/ }),
+    ).toHaveCount(0);
+    for (const [format, name] of formats) {
+      const link = packages.getByRole("link", {
+        name: new RegExp(`x64.*${format}`),
+      });
+      const download = observePackageRequest(page);
+      await link.click();
+      expect(await download).toBe(`${root}/download/v9.8.7/${name}`);
+    }
+  });
+}
+
 for (const [os, architecture, platform, target] of [
   ["Windows", "x86", "Windows", "windows_x86_64"],
   ["Windows", "arm", "Windows", "windows_arm64"],

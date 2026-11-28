@@ -77,12 +77,16 @@ cached ports. IPv4/IPv6 support follows available sockets and interface scope.
 
 ## Network changes and recovery
 
-All desktop, CLI and post-office discovery sockets observe non-loopback interface
-names, addresses and interface indexes every two seconds. A changed inventory
+Desktop, CLI and post-office discovery observe non-loopback interface names,
+addresses and interface indexes. Linux, macOS and Windows reconcile on link or address notifications.
+Other platforms and failed subscriptions check every two seconds. A changed inventory
 rejoins LAN multicast and wakes the existing announce/scan producers; a desktop's
 shared trigger also refreshes routed candidates. Inventory ordering and duplicates
 do not create changes, and an enumeration failure retains the last observation.
-The 30-second periodic multicast join remains a retry fallback. Every advertisement
+The 30-second periodic multicast join remains a retry fallback and also repairs
+missed interface notifications. Known-endpoint keepalives park when no eligible
+endpoint exists and resume on roster observation. Active keepalives retain their
+lease cadence. Every advertisement
 and routed probe still passes the current visibility/scope gates.
 
 Fresh signed announcements supply current TCP endpoints. Changed local interfaces
@@ -95,8 +99,7 @@ a newer signed listening port supersedes a cached port on that same IP. Alternat
 routes retain their bounded race and shared socket budget.
 
 Transport errors retire failed pooled sessions. The 15-second complete-exchange
-budget remains available on stable high-latency routes. The two-second observation period and per-exchange
-timeouts are scheduling bounds, not an end-to-end delivery SLA. Recovery still
+budget remains available on stable high-latency routes. The two-second fallback poll and per-exchange timeouts are scheduling bounds, not an end-to-end delivery SLA. Recovery still
 requires an allowed IP path, fresh discoverable/pinned endpoints and retained
 message state. A configured federation seed whose IP actually changes may need
 its explicit endpoint updated if neither LAN discovery nor another retained route

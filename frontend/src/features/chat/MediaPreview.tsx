@@ -21,6 +21,7 @@ import {
   Share2,
   Image as ImageIcon,
   ImageOff,
+  ScanLine,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { OutgoingMediaPreview } from "@/store/outgoingMediaPreviews";
@@ -46,6 +47,8 @@ import { ReceiveProgress } from "./ReceiveProgress";
 import { isVideo } from "@/lib/mediaTypes";
 import { isMacOverlay } from "@/lib/platform";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
+import { ImageTextResult } from "./ImageTextResult";
+import { ImageQrResult } from "./ImageQrResult";
 import {
   blobMime,
   useFileObjectUrl,
@@ -104,6 +107,10 @@ export function MediaPreview({
   const [explicitOriginal, setExplicitOriginal] = useState<string | null>(null);
   const boundedPreview = /\.(png|jpe?g)$/i.test(name);
   const [lightbox, setLightbox] = useState(false);
+  const [qrImage, setQrImage] = useState<string | null>(null);
+  const [originalReadFailure, setOriginalReadFailure] = useState<string | null>(
+    null,
+  );
   const [previewRetry, setPreviewRetry] = useState(0);
   const [previewFailure, setPreviewFailure] = useState<string | null>(null);
   const previewUrl = useFileObjectUrl(
@@ -121,7 +128,7 @@ export function MediaPreview({
     fileConv,
     lightbox && available && boundedPreview,
     blobMime(name, mime),
-    { reuse: true },
+    { reuse: true, onReadError: () => setOriginalReadFailure(fileConv) },
   );
   const url =
     boundedPreview && explicitOriginal === fileConv && lightbox
@@ -258,13 +265,53 @@ export function MediaPreview({
   const [copying, setCopying] = useState(false);
   const [saving, setSaving] = useState(false);
   const nativeImageText = isMacOverlay();
+  const [textPng, setTextPng] = useState<string | null>(null);
+  useEffect(() => {
+    setTextPng(null);
+  }, [fullUrl, lightbox]);
+  const extractText = () => {
+    const image = imageRef.current;
+    if (
+      !image?.naturalWidth ||
+      !image.naturalHeight ||
+      !captureChatOwnership().current()
+    )
+      return;
+    try {
+      const ratio = Math.min(
+        1,
+        Math.sqrt(4_000_000 / (image.naturalWidth * image.naturalHeight)),
+        2560 / Math.max(image.naturalWidth, image.naturalHeight),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(image.naturalWidth * ratio));
+      canvas.height = Math.max(1, Math.floor(image.naturalHeight * ratio));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Image export unavailable");
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const png = canvas.toDataURL("image/png").split(",")[1];
+      if (!png || png.length > 11_184_812)
+        throw new Error("Image export exceeds limit");
+      setQrImage(null);
+      setTextPng(png);
+    } catch {
+      setError(t("files.textRecognitionFailed"));
+    }
+  };
   const backdropPointerDown = useRef(false);
   const playerRef = useRef<HTMLVideoElement>(null);
   const closeLightbox = useCallback(() => {
     playerRef.current?.pause();
+    setQrImage(null);
+    setTextPng(null);
     setLightbox(false);
     triggerRef.current?.focus();
   }, []);
+  const recognizeQr = () => {
+    if (!captureChatOwnership().current()) return;
+    setQrImage(fileConv);
+    setLightbox(true);
+  };
   useLayoutEffect(() => {
     if (!lightbox) return;
     closeRef.current?.focus();
@@ -905,7 +952,7 @@ export function MediaPreview({
             exit={{ opacity: 0, pointerEvents: "none" }}
             transition={backdropTransition}
             onKeyDown={(event) => {
-              if (["+", "=", "-", "0"].includes(event.key)) {
+              if (!textPng && ["+", "=", "-", "0"].includes(event.key)) {
                 event.preventDefault();
                 if (event.key === "0") updateView(1);
                 else
@@ -916,7 +963,7 @@ export function MediaPreview({
               if (event.key === "Tab") {
                 const buttons =
                   event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                    "button:not(:disabled)",
+                    "button:not(:disabled), [tabindex='0']",
                   );
                 const first = buttons[0],
                   last = buttons[buttons.length - 1];
@@ -940,6 +987,42 @@ export function MediaPreview({
             >
               <X className="h-4 w-4" />
             </button>
+            {textPng && (
+              <ImageTextResult
+                key={fullUrl}
+                png={textPng}
+                onClose={() => {
+                  setTextPng(null);
+                  closeRef.current?.focus();
+                }}
+              />
+            )}
+            {nativeImageText && (
+              <button
+                type="button"
+                onClick={extractText}
+                className="absolute left-6 top-4 rounded-md bg-background px-3 py-2 text-sm text-foreground hover:bg-accent"
+              >
+                {t("files.extractText")}
+              </button>
+            )}
+            {qrImage === fileConv && (
+              <ImageQrResult
+                key={
+                  fullUrl ??
+                  (originalReadFailure === fileConv ? previewUrl : null)
+                }
+                url={
+                  fullUrl ??
+                  (originalReadFailure === fileConv ? previewUrl : null)
+                }
+                onClose={() => {
+                  setQrImage(null);
+                  closeRef.current?.focus();
+                }}
+                onOpenChat={closeLightbox}
+              />
+            )}
             <div
               ref={stageRef}
               className="absolute inset-x-6 bottom-24 top-16 flex items-center justify-center overflow-hidden"
@@ -1081,6 +1164,16 @@ export function MediaPreview({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
+                  {nativeImageText && (
+                    <ContextMenuItem onSelect={extractText}>
+                      <Copy className="h-4 w-4" />
+                      {t("files.extractText")}
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuItem onSelect={recognizeQr}>
+                    <ScanLine className="h-4 w-4" />
+                    {t("files.recognizeQr")}
+                  </ContextMenuItem>
                   {canCopyImage() && (
                     <ContextMenuItem
                       disabled={copying}
@@ -1152,6 +1245,7 @@ export function MediaPreview({
                     () => zoom(viewRef.current.scale * 1.25),
                     view.scale >= 8,
                   ],
+                  ["recognizeQr", ScanLine, recognizeQr, qrImage === fileConv],
                 ] as const
               ).map(([label, Icon, action, disabled]) => (
                 <button

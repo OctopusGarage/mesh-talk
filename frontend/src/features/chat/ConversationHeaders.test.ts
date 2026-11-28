@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vitest";
-import { setLanguage } from "@/lib/i18n";
+import i18n, { setLanguage } from "@/lib/i18n";
 import { usePresence } from "@/store/presence";
 
 vi.mock("@/store/presence", async (importOriginal) => {
@@ -80,8 +80,8 @@ it("shows client-relative person counts including zero without a group online do
   expect(render()).toContain("24 members · 0 known online");
   expect(render()).not.toContain('role="status"');
 });
-it("localizes person counts and explicitly separates unresolved device membership", () => {
-  setLanguage("zh-Hans");
+it("localizes person counts and explicitly separates unresolved device membership", async () => {
+  await i18n.changeLanguage("zh-Hans");
   usePresence.setState({
     map: {
       group: {

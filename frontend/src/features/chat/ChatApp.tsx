@@ -12,6 +12,7 @@ import { AccountProtectionNotice } from "./AccountProtectionNotice";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
+import { GroupVoiceControls } from "./GroupVoiceControls";
 import { chat as chatApi } from "@/lib/api";
 import { startUnreadBadge } from "@/store/unreadBadge";
 import { useChat } from "@/store/chat";
@@ -30,7 +31,7 @@ import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
 export function ChatApp() {
   const recoveryFocus = useRef<HTMLDivElement>(null);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const motionOK = useMotionOK();
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
@@ -132,12 +133,16 @@ export function ChatApp() {
       notificationContext,
     ) as [string[], string | null];
     void chatApi
-      .setNotificationContext(activePeerDevices, activeChannel)
+      .setNotificationContext(
+        activePeerDevices,
+        activeChannel,
+        i18n.resolvedLanguage,
+      )
       .catch(() => {});
     return () => {
       void chatApi.setNotificationContext([], null).catch(() => {});
     };
-  }, [notificationContext, generation]);
+  }, [notificationContext, generation, i18n.resolvedLanguage]);
 
   useEffect(() => {
     if (owner) return startUnreadBadge(owner);
@@ -173,6 +178,7 @@ export function ChatApp() {
           <Sidebar />
           <ConversationView />
           <CallDialog />
+          <GroupVoiceControls />
           <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
             {draftError && (
               <div

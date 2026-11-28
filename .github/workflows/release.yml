@@ -172,6 +172,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
+            squashfs-tools \
+            xz-utils \
             protobuf-compiler
 
       # 4️⃣ Cache Cargo
@@ -211,6 +213,12 @@ jobs:
       - name: Build headless post-office node
         run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
 
+      - name: Optimize Linux installers before collection
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release/optimize_linux.py "target/${TARGET}/release/bundle"
+
       - name: Verify frontend assets
         shell: bash
         run: node scripts/release/check-variant-assets.mjs
@@ -218,6 +226,8 @@ jobs:
       # 7️⃣ Collect artifacts
       - name: Collect build artifacts
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: bash scripts/release/package-app.sh collect
 
       - name: Collect version-bound updater artifacts
@@ -272,6 +282,10 @@ jobs:
           archive="$(bash scripts/release/package-post-office.sh '${{ matrix.target }}' "$ARTIFACT_TAG")"
           node scripts/release/sign-blob.mjs "$archive" "${archive}.bundle"
 
+      - name: Report release download sizes
+        shell: bash
+        run: bash scripts/release/package-app.sh report_sizes >> "$GITHUB_STEP_SUMMARY"
+
       # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
       # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.
       - name: Attest build provenance
@@ -286,6 +300,12 @@ jobs:
           subject-path: |
             release_zips/mesh-talk-update*
             release_zips/mesh-talk-patch_*
+
+      - name: Attest standalone Linux installer provenance
+        if: runner.os == 'Linux'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release_zips/mesh-talk-installer_*
 
       # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
       # once on Linux x64 (deps are platform-independent) and shipped with the release.
@@ -350,7 +370,7 @@ jobs:
           path: workflow-assets
       - name: Verify workflow artifacts
         id: verified_workflow
-        run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
+        run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA" --require-linux-downloads
       - name: Recheck draft state immediately before the single upload
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         run: node scripts/release/release-state.mjs guard "$ARTIFACT_TAG"

@@ -11,15 +11,42 @@ const packageApp = fileURLToPath(new URL("../release/package-app.sh", import.met
 const packageSource = readFileSync(packageApp, "utf8");
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("release size reports list exact download bytes and omit detached signatures", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-size-"));
+  try {
+    const directory = join(root, "release_zips");
+    mkdirSync(directory);
+    writeFileSync(join(directory, "mesh-talk_fixture.zip"), "archive");
+    writeFileSync(join(directory, "mesh-talk-installer_fixture.deb"), "installer");
+    writeFileSync(join(directory, "mesh-talk-update_fixture.AppImage.sig"), "signature");
+    const report = execFileSync("bash", [packageApp, "report_sizes"], { cwd: root, encoding: "utf8" });
+    assert.match(report, /mesh-talk_fixture\.zip \| 7 \|/);
+    assert.match(report, /mesh-talk-installer_fixture\.deb \| 9 \|/);
+    assert.doesNotMatch(report, /\.sig/);
+    assert.match(workflow, /package-app\.sh report_sizes >> "\$GITHUB_STEP_SUMMARY"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("release artifact steps delegate policy with target passed as data", () => {
   for (const [name, mode] of [["Collect build artifacts", "collect"], ["Generate SHA256 checksums", "checksums"], ["Package and sign artifacts", "package"]]) {
     const step = workflow.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
     assert.ok(step, name);
     assert.ok(step.includes(`run: bash scripts/release/package-app.sh ${mode}`));
     assert.doesNotMatch(step, /run: \|/);
-    if (mode === "package") assert.match(step, /TARGET: \$\{\{ matrix\.target \}\}/);
+    if (mode !== "checksums") assert.match(step, /TARGET: \$\{\{ matrix\.target \}\}/);
   }
   assert.doesNotMatch(packageSource, /\$\{\{/);
+});
+
+test("Linux installer compression precedes both release roles and uses Tauri RPM support", () => {
+  const optimization = workflow.indexOf("python3 scripts/release/optimize_linux.py");
+  assert.ok(optimization > 0);
+  assert.ok(optimization < workflow.indexOf("scripts/release/package-app.sh collect"));
+  assert.ok(optimization < workflow.indexOf("scripts/release/updater.mjs collect"));
+  const config = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  assert.deepEqual(config.bundle.linux.rpm.compression, { type: "xz", level: 6 });
 });
 
 test("manual packages exclude updater payloads while the signed manifest binds standalone roles", { skip: process.platform === "win32" }, () => {
@@ -49,6 +76,13 @@ test("manual packages exclude updater payloads while the signed manifest binds s
       const packageEnv = { ...process.env, TARGET: target, ARTIFACT_TAG: "v0.1.5" };
       execFileSync("bash", [packageApp, "package"], { cwd: root, env: packageEnv, stdio: "pipe" });
       const archive = join(root, "release_zips", `mesh-talk_v0.1.5_${platform}.zip`);
+      if (platform.startsWith("linux_")) {
+        for (const extension of ["deb", "rpm"]) {
+          const installer = join(root, "release_zips", `mesh-talk-installer_v0.1.5_${platform}.${extension}`);
+          assert.deepEqual(readFileSync(installer), files.get(`installer with spaces.${extension}`));
+        }
+        assert.throws(() => readFileSync(join(root, "release_zips", `mesh-talk-installer_v0.1.5_${platform}.AppImage`)), { code: "ENOENT" });
+      }
       const members = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/);
       assert.deepEqual(members.sort(), [...extensions.map((extension) => `release/installer with spaces.${extension}`), "release/SHA256SUMS", "release/UPDATER_SHA256SUMS"].sort(), platform);
       const manifest = execFileSync("unzip", ["-p", archive, "release/SHA256SUMS"], { encoding: "utf8" });
@@ -65,6 +99,15 @@ test("manual packages exclude updater payloads while the signed manifest binds s
       execFileSync("zip", [archive, `release/${full}`], { cwd: root, stdio: "pipe" });
       execFileSync("bash", [packageApp, "package"], { cwd: root, env: packageEnv, stdio: "pipe" });
       assert.deepEqual(execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/).sort(), members.sort(), "repackaging must discard stale ZIP entries");
+      if (platform.startsWith("linux_")) {
+        for (const name of standalone) rmSync(join(root, "release", name));
+        execFileSync("bash", [packageApp, "checksums"], { cwd: root, stdio: "pipe" });
+        execFileSync("bash", [packageApp, "package"], { cwd: root, env: packageEnv, stdio: "pipe" });
+        assert.deepEqual(
+          readFileSync(join(root, "release_zips", `mesh-talk-installer_v0.1.5_${platform}.AppImage`)),
+          files.get("installer with spaces.AppImage"),
+        );
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

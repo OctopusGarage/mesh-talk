@@ -207,7 +207,17 @@ fn domain_pages_ack_only_observed_kinds_and_empty_progress_do_not_invent_state()
             .iter()
             .any(|r| r["kind"] == "state")
     );
-    fixture.ack(&empty).unwrap();
+    wake(fixture.view.app_handle(), &fixture.scope);
+    assert_eq!(fixture.ack(&empty).unwrap(), json!(true));
+    let empty = fixture.pull(empty["next"].clone(), false).unwrap();
+    assert!(
+        !empty["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "state")
+    );
+    assert_eq!(fixture.ack(&empty).unwrap(), json!(false));
     let pulse = |kind| {
         crate::events::emit_node_state_changed(
             fixture.view.app_handle(),

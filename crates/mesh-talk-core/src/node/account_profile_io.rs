@@ -6,6 +6,38 @@ use crate::eventlog::LogError;
 use crate::node::profile::ProfilePayload;
 
 impl Node {
+    /// Presentation-only identity lookup, including retained verified routes.
+    /// Never use a display name as authentication or delivery authority.
+    pub fn peer_display_identity(&self, device: &str) -> (Option<String>, Option<String>) {
+        let peer = self.routing_peer(device);
+        let historical = if peer.is_none() {
+            self.historical_dm_peers()
+                .into_iter()
+                .find(|proof| proof.public().user_id() == device)
+        } else {
+            None
+        };
+        let account = peer
+            .as_ref()
+            .and_then(|peer| peer.account_id.clone())
+            .or_else(|| historical.as_ref().and_then(|proof| proof.account_id()));
+        let name = account
+            .as_deref()
+            .and_then(|account| self.account_display_name(account).ok().flatten())
+            .or_else(|| peer.map(|peer| peer.name))
+            .or_else(|| historical.map(|proof| proof.name));
+        (account, name)
+    }
+
+    /// Point lookup for host presentation; does not enumerate or replay groups.
+    pub fn channel_display_name(&self, channel: crate::eventlog::ConversationId) -> Option<String> {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .map(|state| state.name().to_owned())
+    }
+
     /// Best known presentation name for an account, including offline contacts.
     /// Names are descriptive and may be shared by different account identities.
     pub fn account_display_name(&self, account_id: &str) -> Result<Option<String>, LogError> {
@@ -40,6 +72,14 @@ impl Node {
             })
             .map(|proof| proof.name)
             .min())
+    }
+
+    /// Observe committed changes to this account's current signed profile.
+    pub fn subscribe_own_account_profile_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .subscribe_own_changes(self.account_id())
     }
 
     pub fn account_profile(&self, account_id: &str) -> Result<Option<AccountProfile>, LogError> {

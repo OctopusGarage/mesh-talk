@@ -1,37 +1,27 @@
 //! Shared post-office threshold meaning; repository physical charge is authority.
 use super::*;
+use mesh_talk_protocol::mailbox::capacity::{Admission, CapacityLimits};
+
 #[derive(Clone, Copy)]
-pub(super) struct RelayLimits {
-    count: u64,
-    bytes: u64,
-    envelope_count: u64,
-    envelope_bytes: u64,
-}
+pub(super) struct RelayLimits(CapacityLimits);
+
 impl RelayLimits {
-    pub(super) fn new(
-        count: u64,
-        slack: u64,
-        bytes: u64,
-        byte_slack: u64,
-    ) -> Result<Self, LogError> {
-        Ok(Self {
-            count,
-            bytes,
-            envelope_count: count
-                .checked_add(slack)
-                .ok_or(LogError::RepositoryCounterExhausted)?,
-            envelope_bytes: bytes
-                .checked_add(byte_slack)
-                .ok_or(LogError::RepositoryCounterExhausted)?,
-        })
+    fn new(count: u64, slack: u64, bytes: u64, byte_slack: u64) -> Result<Self, LogError> {
+        CapacityLimits::new(count, slack, bytes, byte_slack)
+            .map(Self)
+            .map_err(|_| LogError::RepositoryCounterExhausted)
     }
+
     pub(super) fn at_base(self, charge: DomainChargeMetadata) -> bool {
-        charge.event_count <= self.count && charge.estimated_bytes <= self.bytes
+        self.0.at_base(charge.event_count, charge.estimated_bytes)
     }
+
     pub(super) fn above_envelope(self, charge: DomainChargeMetadata) -> bool {
-        charge.event_count > self.envelope_count || charge.estimated_bytes > self.envelope_bytes
+        self.0
+            .above_envelope(charge.event_count, charge.estimated_bytes)
     }
 }
+
 impl Default for RelayLimits {
     fn default() -> Self {
         Self::new(
@@ -93,23 +83,23 @@ impl IndexedRelayState {
         cost: u64,
     ) -> Result<crate::eventlog::repository::AppendGate<RelayBlock>, LogError> {
         use crate::eventlog::repository::AppendGate;
-        if self.limits.envelope_count == 0 || cost > self.limits.envelope_bytes {
+        if !self.limits.0.allows_event(cost) {
             return Ok(AppendGate::Block(RelayBlock::Impossible));
         }
         let charge = self.repository.domain_charge_on(c)?;
-        let count = charge
-            .event_count
-            .checked_add(1)
-            .ok_or(LogError::RepositoryCounterExhausted)?;
-        let bytes = charge
-            .estimated_bytes
-            .checked_add(cost)
-            .ok_or(LogError::RepositoryCounterExhausted)?;
-        if count > self.limits.envelope_count || bytes > self.limits.envelope_bytes {
-            self.request_drain_on(c)?;
-            fault_cut(c, "drain")?;
-            return Ok(AppendGate::Block(RelayBlock::Backpressure));
+        match self
+            .limits
+            .0
+            .admit(charge.event_count, charge.estimated_bytes, cost)
+            .map_err(|_| LogError::RepositoryCounterExhausted)?
+        {
+            Admission::Accept => Ok(AppendGate::Accept),
+            Admission::Backpressure => {
+                self.request_drain_on(c)?;
+                fault_cut(c, "drain")?;
+                Ok(AppendGate::Block(RelayBlock::Backpressure))
+            }
+            Admission::Impossible => Ok(AppendGate::Block(RelayBlock::Impossible)),
         }
-        Ok(AppendGate::Accept)
     }
 }

@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { LanReviewDialog } from "./LanReviewDialog";
+import type { FavoriteSource } from "@/lib/api/messageFavorites";
 import { useMessageArrivalMotion } from "./useMessageArrivalMotion";
 import { ReactionSummaryDialog } from "./ReactionSummaryDialog";
 import { DeleteChatDialog } from "./DeleteChatDialog";
@@ -20,7 +23,11 @@ import {
 import { ForwardDialog } from "./forwarding/ForwardDialog";
 import { canForward, forwardSource } from "./forwarding/selection";
 import type { ForwardSource } from "@/lib/api/messageForwarding";
-import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
+import {
+  canCollect,
+  MAX_FAVORITE_MESSAGES,
+  selectionSource,
+} from "./favorites/selection";
 import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
 import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
@@ -47,6 +54,7 @@ import { messageSummary } from "@/lib/messagePresentation";
 import { usePacks } from "@/store/packs";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ConversationReceptionStatus } from "./ReceptionStatus";
+import { VoiceCaptureDialog } from "./VoiceCaptureDialog";
 import { CameraCaptureDialog } from "./CameraCaptureDialog";
 import { Composer } from "./Composer";
 import { useDrafts } from "@/store/drafts";
@@ -69,6 +77,7 @@ import { VerifyContactDialog } from "./VerifyContactDialog";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
 import { CallButtons } from "./CallDialog";
+import { GroupVoiceEntry } from "./GroupVoiceControls";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import { TransferBar } from "./TransferBar";
@@ -214,6 +223,21 @@ export function ConversationView() {
     setForwardingState({ scope: forwardingScope, source });
   if (forwardingState.scope !== forwardingScope)
     setForwardingState({ scope: forwardingScope, source: null });
+  const reviewScope = `${owner}:${authGeneration}:${receptionScope}`;
+  const [review, setReview] = useState<{
+    scope: string;
+    source: FavoriteSource;
+    expiresAt: ChatMessage["expiresAtMs"];
+  } | null>(null);
+  if (review && review.scope !== reviewScope) setReview(null);
+  const reviewDialog = review?.scope === reviewScope && (
+    <LanReviewDialog
+      key={reviewScope}
+      source={review.source}
+      expiresAt={review.expiresAt}
+      onClose={() => setReview(null)}
+    />
+  );
   const collection = useMessageCollection(
     active,
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
@@ -467,6 +491,7 @@ export function ConversationView() {
             className="h-10 shrink-0"
           />
         )}
+        {reviewDialog}
         {ready ? (
           <EmptyState />
         ) : bootFailed ? (
@@ -594,6 +619,39 @@ export function ConversationView() {
           conversation={{ ...active, name: headerName }}
         />
         {isChannel &&
+          owner &&
+          !previousAccount &&
+          !sharedReference &&
+          !archived &&
+          !pendingInvite &&
+          !left &&
+          !dissolved && (
+            <GroupVoiceEntry
+              group={active.id}
+              self={myId}
+              owner={owner}
+              memberDevices={() => {
+                const accepted = members.filter((member) => !member.pending);
+                const devices = new Set(
+                  accepted.map((member) => member.user_id),
+                );
+                const accounts = new Set(
+                  accepted.map((member) => member.account_id).filter(Boolean),
+                );
+                return useChat
+                  .getState()
+                  .peers.filter(
+                    (peer) =>
+                      !peer.post_office &&
+                      peer.directly_reachable !== false &&
+                      (devices.has(peer.user_id) ||
+                        (peer.account_id && accounts.has(peer.account_id))),
+                  )
+                  .map((peer) => peer.user_id);
+              }}
+            />
+          )}
+        {isChannel &&
         !previousAccount &&
         (sharedReference || (!archived && !pendingInvite)) ? (
           <MembersDialog key={key} dissolved={dissolved} />
@@ -669,6 +727,7 @@ export function ConversationView() {
           }}
         />
       )}
+      {reviewDialog}
       {collection.draft && (
         <FavoriteEditor
           key={`favorite:${owner}:${authGeneration}:${key}`}
@@ -879,6 +938,16 @@ export function ConversationView() {
                       canForward(m)
                         ? (message) =>
                             setForwarding(forwardSource(active, [message]))
+                        : undefined
+                    }
+                    onLanReview={
+                      isTauri()
+                        ? (message) =>
+                            setReview({
+                              scope: reviewScope,
+                              source: selectionSource(active, [message]),
+                              expiresAt: message.expiresAtMs,
+                            })
                         : undefined
                     }
                     onCollect={
@@ -1127,6 +1196,7 @@ export function ConversationView() {
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
           onCamera={attachments.openCamera}
+          onVoice={attachments.openVoice}
           onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
@@ -1178,6 +1248,12 @@ export function ConversationView() {
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}
+        />
+      )}
+      {attachments.voiceOpen && (
+        <VoiceCaptureDialog
+          onCancel={attachments.cancelVoice}
+          onSend={attachments.sendVoice}
         />
       )}
       {attachments.cameraOpen && (

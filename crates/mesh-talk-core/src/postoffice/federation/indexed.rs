@@ -153,7 +153,7 @@ impl IndexedRelayEndpoint {
             .await
             .map_err(|e| e.to_string())
     }
-    pub async fn serve_connection<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn serve_connection<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: SecureChannel<IO>,
         origin_signer: Option<&DeviceIdentity>,
@@ -257,7 +257,7 @@ impl IndexedRelayEndpoint {
         self.sync_inventory_on(&mut channel, expected, request, owner, None)
             .await
     }
-    async fn sync_inventory_on<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn sync_inventory_on<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         expected: &PublicIdentity,
@@ -352,7 +352,7 @@ impl IndexedRelayEndpoint {
     /// Two bounded emitted page buffers at most. Raw empty/nonfederated slices
     /// are coalesced before frame accounting. One bounded lookahead determines
     /// terminality even at the exact 256-frame ceiling.
-    async fn send_inventory<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn send_inventory<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         lease: &SessionLease,
@@ -413,7 +413,7 @@ impl IndexedRelayEndpoint {
     }
     /// Authenticated Noise is necessary but federation additionally requires
     /// configured pins or successful mutual membership before metadata access.
-    pub async fn serve_connection_checked<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn serve_connection_checked<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         mut channel: SecureChannel<IO>,
         origin_signer: Option<&DeviceIdentity>,
@@ -515,7 +515,7 @@ impl IndexedRelayEndpoint {
         }
         Ok(())
     }
-    async fn serve_federation<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn serve_federation<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         request: &[u8],
@@ -527,7 +527,7 @@ impl IndexedRelayEndpoint {
         self.serve_inventory_on(channel, request, started, None)
             .await
     }
-    async fn serve_inventory_on<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn serve_inventory_on<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         request: &[u8],
@@ -588,7 +588,7 @@ impl IndexedRelayEndpoint {
         }
         Ok(())
     }
-    async fn serve_directory<IO: AsyncRead + AsyncWrite + Unpin>(
+    async fn serve_directory<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         channel: &mut SecureChannel<IO>,
         request: &[u8],
@@ -627,7 +627,7 @@ impl IndexedRelayEndpoint {
         Ok(())
     }
 }
-async fn receive_inventory<IO: AsyncRead + AsyncWrite + Unpin>(
+async fn receive_inventory<IO: AsyncRead + AsyncWrite + Unpin + Send>(
     channel: &mut SecureChannel<IO>,
     lease: &SessionLease,
 ) -> Result<(), IndexedRelayError> {

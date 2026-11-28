@@ -7,13 +7,14 @@ import { requiredBrowserPaths } from "../evals/browser-report.mjs";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 96], ["extended", 97]]) {
+  for (const [tier, count] of [["core", 97], ["extended", 98]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "browser-error-evidence.spec.ts" && path[1] === "browser evidence retains nested causes and preserves the strict error gate"));
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 27);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 28);
+    assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "private message shows a mailbox only for its confirmed custody"));
     for (const size of ["390x560", "1280x720"]) {
       for (const source of ["sender", "member", "post_office", "linked_device", "unknown"]) {
         const title = `received-message source ${source} stays accessible at ${size}`;

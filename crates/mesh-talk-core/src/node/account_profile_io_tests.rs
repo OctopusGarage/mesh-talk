@@ -434,6 +434,11 @@ fn account_display_name_prefers_signed_profile_and_retains_offline_discovery_nam
             .unwrap(),
         None
     );
+    assert_eq!(
+        node.peer_display_identity(&device.public().user_id()),
+        (Some(contact.account_id()), Some("Duncan Jones".into()))
+    );
+    assert_eq!(node.peer_display_identity(&"ab".repeat(16)), (None, None));
 }
 
 #[test]

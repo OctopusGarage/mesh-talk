@@ -188,3 +188,59 @@ it("does not install delayed settings after the same local owner adopts another 
   expect(useSettings.getState().callsEnabled).toBe(false);
   expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
 });
+
+it("serializes group toggles and preserves sibling groups", async () => {
+  let saved: string[] = [];
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "set_app_settings") saved = args.settings.muted_groups;
+    return command === "get_app_settings"
+      ? { muted_groups: [...saved] }
+      : undefined;
+  });
+  await Promise.all([
+    useSettings.getState().setGroupMuted("one", true),
+    useSettings.getState().setGroupMuted("two", true),
+  ]);
+  expect(useSettings.getState().mutedGroups).toEqual(["one", "two"]);
+});
+it("does not publish rejected preferences and allows retry", async () => {
+  invoke.mockRejectedValueOnce(new Error("disk full"));
+  await expect(
+    useSettings.getState().setGroupMuted("one", true),
+  ).rejects.toThrow("disk full");
+  expect(useSettings.getState().mutedGroups).toEqual([]);
+  invoke.mockImplementation(async (command) =>
+    command === "get_app_settings" ? {} : undefined,
+  );
+  await useSettings.getState().setGroupMuted("two", true);
+  expect(useSettings.getState().mutedGroups).toEqual(["two"]);
+});
+it("rejects a queued group preference when its owner retires", async () => {
+  const pending = useSettings.getState().setGroupMuted("one", true);
+  useAuth.setState({ generation: 1 });
+  await expect(pending).rejects.toThrow("Settings session changed");
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("preserves persisted groups before initial load and rejects its delayed snapshot", async () => {
+  let finish!: (value: unknown) => void;
+  let saved = ["old"];
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "set_app_settings") saved = args.settings.muted_groups;
+    return command === "get_app_settings"
+      ? { muted_groups: [...saved] }
+      : undefined;
+  });
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const loading = useSettings.getState().load();
+  await useSettings.getState().setGroupMuted("new", true);
+  expect(saved).toEqual(["old", "new"]);
+  finish({ muted_groups: ["old"] });
+  await loading;
+  expect(useSettings.getState().mutedGroups).toEqual(["old", "new"]);
+});

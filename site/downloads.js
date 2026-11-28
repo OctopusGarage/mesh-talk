@@ -117,7 +117,7 @@
       (selectedPlatform === detected ? architecture : null);
     const key = `${selectedPlatform}_${selectedArch}`;
     const asset = packages.get(key);
-    if (asset) {
+    if (asset && !(asset.os === "linux" && asset.individual.length)) {
       primary.href = asset.url;
       primary.dataset.package = key;
       putAttribute(primary, "aria-label", "Download for {platform}", {
@@ -174,27 +174,52 @@
       throw Error("Invalid Stable release");
     const tag = data.tag_name;
     const result = new Map();
+    function publishedAsset(name) {
+      const matches = data.assets.filter((asset) => asset?.name === name);
+      if (matches.length !== 1) return null;
+      const asset = matches[0];
+      const url = `${releases}/download/${tag}/${name}`;
+      return asset.state === "uploaded" &&
+        asset.browser_download_url === url &&
+        Number.isSafeInteger(asset.size) &&
+        asset.size > 0 &&
+        asset.size <= 1024 ** 3
+        ? asset
+        : null;
+    }
     for (const [os, platform] of Object.entries(platforms)) {
       for (const [arch, label] of Object.entries(platform.targets)) {
         const key = `${os}_${arch}`;
         const name = `mesh-talk_${tag}_${key}.zip`;
-        const matches = data.assets.filter((asset) => asset?.name === name);
-        if (matches.length !== 1) continue;
-        const asset = matches[0];
-        const url = `${releases}/download/${tag}/${name}`;
-        if (
-          asset.state !== "uploaded" ||
-          asset.browser_download_url !== url ||
-          !Number.isSafeInteger(asset.size) ||
-          asset.size <= 0 ||
-          asset.size > 1024 ** 3
-        )
-          continue;
+        const asset = publishedAsset(name);
+        if (!asset) continue;
+        const executable = `mesh-talk-update_${tag}_${key}.nsis.exe`;
+        const standalone =
+          os === "windows" && publishedAsset(`${executable}.sig`)
+            ? publishedAsset(executable)
+            : null;
+        const individual = [];
+        if (standalone) individual.push({ ...standalone, format: "EXE" });
+        if (os === "linux") {
+          for (const format of ["deb", "rpm", "AppImage"]) {
+            const installer = publishedAsset(
+              `mesh-talk-installer_${tag}_${key}.${format}`,
+            );
+            const update = `mesh-talk-update_${tag}_${key}.AppImage`;
+            const image =
+              format === "AppImage" && publishedAsset(`${update}.sig`)
+                ? publishedAsset(update)
+                : null;
+            if (installer || image)
+              individual.push({ ...(installer ?? image), format });
+          }
+        }
         result.set(key, {
           url: asset.browser_download_url,
           label,
           size: asset.size,
           os,
+          individual,
         });
       }
     }
@@ -202,16 +227,17 @@
     return { tag, packages: result };
   }
 
-  function packageLink(key, asset) {
+  function packageLink(key, asset, standalone = null) {
     const link = document.createElement("a");
     link.className = "package-link";
-    link.href = asset.url;
-    link.dataset.package = key;
+    link.href = standalone?.browser_download_url ?? asset.url;
+    if (!standalone) link.dataset.package = key;
     const label = document.createElement("strong");
     put(label, "Download for {label}", { label: asset.label });
     const detail = document.createElement("span");
-    put(detail, "ZIP · {size} MB", {
-      size: (asset.size / 1024 / 1024).toFixed(1),
+    put(detail, standalone ? "{format} · {size} MB" : "ZIP · {size} MB", {
+      format: standalone?.format,
+      size: ((standalone?.size ?? asset.size) / 1024 / 1024).toFixed(1),
     });
     link.append(label, detail);
     return link;
@@ -237,14 +263,21 @@
       packages = selected.packages;
       document.querySelectorAll("[data-packages]").forEach((container) => {
         const os = container.dataset.packages;
-        const choices = Object.entries(platforms[os].targets).map(
+        const choices = Object.entries(platforms[os].targets).flatMap(
           ([arch, label]) => {
             const key = `${os}_${arch}`;
-            if (packages.has(key)) return packageLink(key, packages.get(key));
+            const asset = packages.get(key);
+            if (asset)
+              return [
+                ...asset.individual.map((installer) =>
+                  packageLink(key, asset, installer),
+                ),
+                packageLink(key, asset),
+              ];
             const missing = document.createElement("p");
             missing.className = "package-unavailable";
             put(missing, "{label} is unavailable in this release.", { label });
-            return missing;
+            return [missing];
           },
         );
         container.replaceChildren(...choices);
@@ -371,6 +404,13 @@
       event.altKey
     )
       return;
+    if (
+      selectedPlatform === "linux" &&
+      [...packages.values()].some(
+        (asset) => asset.os === "linux" && asset.individual.length,
+      )
+    )
+      return; // The normal anchor leads to the individual format choices.
     if (![...packages.values()].some((asset) => asset.os === selectedPlatform))
       return;
     event.preventDefault();

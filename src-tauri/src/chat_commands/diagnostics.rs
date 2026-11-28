@@ -18,6 +18,13 @@ pub struct DiagPeerInfo {
     pub account_id: Option<String>,
     /// Whole seconds since this peer was last heard from.
     pub last_seen_secs: u64,
+    pub routed_latency: Option<DiagRoutedLatency>,
+}
+
+#[derive(Serialize)]
+pub struct DiagRoutedLatency {
+    pub round_trip_ms: u64,
+    pub age_secs: u64,
 }
 
 /// This device's own identity + network facts, for the Diagnostics page.
@@ -39,21 +46,38 @@ pub async fn diag_get_peers(
 ) -> Result<Vec<DiagPeerInfo>, CommandError> {
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    let now = std::time::Instant::now();
     Ok(rt
         .peers()
         .into_iter()
-        .map(|p| DiagPeerInfo {
-            user_id: p.public.user_id(),
-            name: p.name,
-            ip: p.addr.ip().to_string(),
-            tcp_port: p.addr.port(),
-            via_gateway: p
+        .map(|p| {
+            let routed_latency = p
                 .routes
                 .iter()
-                .any(|route| route.addr == p.addr && route.source == RouteSource::Gateway),
-            post_office: p.post_office,
-            account_id: p.account_id,
-            last_seen_secs: p.last_seen.elapsed().as_secs(),
+                .filter_map(|route| {
+                    let rtt = route.routed_rtt?;
+                    (now < route.presence_expires_at?)
+                        .then_some((now.saturating_duration_since(route.last_seen), rtt))
+                })
+                .min_by_key(|(age, _)| *age)
+                .map(|(age, rtt)| DiagRoutedLatency {
+                    round_trip_ms: rtt.as_millis().min(u64::MAX as u128) as u64,
+                    age_secs: age.as_secs(),
+                });
+            DiagPeerInfo {
+                user_id: p.public.user_id(),
+                name: p.name,
+                ip: p.addr.ip().to_string(),
+                tcp_port: p.addr.port(),
+                via_gateway: p
+                    .routes
+                    .iter()
+                    .any(|route| route.addr == p.addr && route.source == RouteSource::Gateway),
+                post_office: p.post_office,
+                account_id: p.account_id,
+                last_seen_secs: p.last_seen.elapsed().as_secs(),
+                routed_latency,
+            }
         })
         .collect())
 }

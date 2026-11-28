@@ -26,6 +26,7 @@ struct CurrentHeader {
 }
 pub(crate) struct IndexedAccountProfileStore {
     source: PublishedHistorySource,
+    own_changes: Option<(String, tokio::sync::watch::Sender<()>)>,
 }
 pub(crate) struct AccountProfilePage {
     pub rows: Vec<AccountProfile>,
@@ -79,7 +80,10 @@ impl IndexedAccountProfileStore {
                 log.sync()
             },
         )?;
-        Ok(Self { source })
+        Ok(Self {
+            source,
+            own_changes: None,
+        })
     }
     fn read_on(c: &Connection, account: &str) -> Result<Option<AccountProfile>, LogError> {
         let header:Option<CurrentHeader>=c.query_row("SELECT h.version,h.created,h.encoded_bytes,length(b.body),h.name FROM current_account_profile_headers h LEFT JOIN current_account_profile_bodies b USING(account) WHERE h.account=?1",[account],|r|Ok(CurrentHeader {version:r.get(0)?,created:r.get(1)?,size:r.get(2)?,actual:r.get(3)?,name:r.get(4)?})).optional()?;
@@ -269,10 +273,28 @@ impl IndexedAccountProfileStore {
     }
     pub(crate) fn record(&mut self, value: AccountProfile) -> Result<bool, LogError> {
         self.source.check_write()?;
-        self.source
+        let applied = self
+            .source
             .profile()
             .database()
-            .transaction(|c| Self::put_on(c, &value))
+            .transaction(|c| Self::put_on(c, &value))?;
+        if applied
+            && let Some((account, changes)) = &self.own_changes
+            && *account == value.account_id()
+        {
+            changes.send_replace(());
+        }
+        Ok(applied)
+    }
+    pub(crate) fn subscribe_own_changes(
+        &mut self,
+        account: String,
+    ) -> tokio::sync::watch::Receiver<()> {
+        let (observed, changes) = self
+            .own_changes
+            .get_or_insert_with(|| (account.clone(), tokio::sync::watch::channel(()).0));
+        debug_assert_eq!(*observed, account);
+        changes.subscribe()
     }
     pub(crate) fn revision(&self) -> Result<u64, LogError> {
         self.source

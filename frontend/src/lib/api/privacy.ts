@@ -18,6 +18,12 @@ export const privacy = {
   initiateContact: (owner: string, account: string) =>
     invoke<PrivacySnapshot>("initiate_privacy_contact", { owner, account }),
   get: (owner: string) => invoke<PrivacySnapshot>("get_privacy", { owner }),
+  setPersonal: (owner: string, account: string | null, enabled: boolean) =>
+    invoke<PrivacySnapshot>("set_personal_privacy", {
+      owner,
+      account,
+      enabled,
+    }),
   setInvisible: (owner: string, invisible: boolean) =>
     invoke<PrivacySnapshot>("set_invisible", { owner, invisible }),
   setAllowed: (owner: string, account: string, allowed: boolean) =>

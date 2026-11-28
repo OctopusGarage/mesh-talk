@@ -16,6 +16,7 @@ test.use({
 type Signal = { target: string; payload: string };
 declare global {
   interface Window {
+    __testWindowTrack?: MediaStreamTrack;
     __beforeCallAnswer: () => Promise<void>;
     __callIceGate: {
       ready: Promise<void>;
@@ -291,7 +292,58 @@ for (const scenario of [
             videoTracks: scenario.remoteVideo[index],
           });
       }
-      await a.getByTestId("call-hangup").click();
+      if (scenario.name === "video") {
+        await a.evaluate(() => {
+          navigator.mediaDevices.getDisplayMedia = async () => {
+            const canvas = document.createElement("canvas");
+            canvas.width = 640;
+            canvas.height = 480;
+            const context = canvas.getContext("2d")!;
+            context.fillStyle = "#ff00ff";
+            const stream = canvas.captureStream(10);
+            const track =
+              stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+            track.getSettings = () => ({ displaySurface: "window" });
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            track.requestFrame();
+            window.__testWindowTrack = track;
+            return stream;
+          };
+        });
+        const share = a.getByTestId("call-window-share");
+        await share.click();
+        await expect(a.getByText("Sharing a window")).toBeVisible();
+        const receivesWindow = () =>
+          b
+            .locator("video")
+            .first()
+            .evaluate((video: HTMLVideoElement) => {
+              if (!video.videoWidth) return false;
+              const canvas = document.createElement("canvas");
+              canvas.width = canvas.height = 1;
+              const context = canvas.getContext("2d")!;
+              context.drawImage(video, 0, 0, 1, 1);
+              const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+              return red > 200 && green < 60 && blue > 200;
+            });
+        await expect.poll(receivesWindow).toBe(true);
+        await share.click();
+        await expect(a.getByText("Sharing a window")).toHaveCount(0);
+        await expect
+          .poll(() => a.evaluate(() => window.__testWindowTrack?.readyState))
+          .toBe("ended");
+        await expect.poll(receivesWindow).toBe(false);
+        await share.click();
+        await expect(a.getByText("Sharing a window")).toBeVisible();
+      }
+      await (scenario.name === "video" ? b : a)
+        .getByTestId("call-hangup")
+        .click();
+      if (scenario.name === "video") {
+        await expect
+          .poll(() => a.evaluate(() => window.__testWindowTrack?.readyState))
+          .toBe("ended");
+      }
       for (const page of [a, b]) {
         await expect
           .poll(() => page.evaluate(() => window.__callMediaHarness.phase()))

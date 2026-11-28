@@ -5,6 +5,39 @@ import type { PresenceMap } from "../src/lib/types";
 const BOB = "acc_bob_bbbb2222";
 const GROUP = "chan_team_dddd4444";
 
+test("idle discovery shows its status without continuously animating the sidebar", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: { online: false, last_seen_secs: 120, devices: [] },
+    });
+  }, BOB);
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+
+  const status = page.getByTestId("connection-status");
+  await expect(status).toHaveText("Searching this network");
+  await expect
+    .poll(() =>
+      status.evaluate(
+        (label) =>
+          label
+            .parentElement!.getAnimations({ subtree: true })
+            .filter(
+              (animation) =>
+                animation.effect?.getTiming().iterations === Infinity,
+            ).length,
+      ),
+    )
+    .toBe(0);
+});
+
 test("registration office survives a different introducer and expires during IPC failure", async ({
   page,
 }) => {

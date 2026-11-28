@@ -34,7 +34,7 @@ test("nextest security minimum and every CI installer follow the version owner",
     config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
     versions.nextest,
   );
-  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "sanitizers.yml", "mutants.yml"]) {
+  for (const file of ["ci.yml", "windows-workspace.yml", "sanitizers.yml", "mutants.yml"]) {
     const source = read(file);
     const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(
       (match) => match[1],
@@ -140,7 +140,7 @@ test("Linux archives preserve the sole native cache writer and strict required a
   assert.match(upload,/if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(!\(github\.event_name == 'pull_request' && github\.base_ref == 'dev' && github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'\)\) \}\}/u);
 
   const consumer=read("linux-workspace-consumer.yml");
-  assert.ok(consumer.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
+  assert.ok(producer.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
   assert.doesNotMatch(consumer,/rust-cache|npm ci|npm run build|cargo (?:build|test|clippy)|frontend\//u);
   assert.match(consumer,/timeout-minutes: 90/u);
   for(const text of ["needs.checks.outputs.rustVersion","linux-workspace-consumer.yml"]) assert.ok(ci.includes(text));
@@ -261,7 +261,7 @@ test("browser and native dependency installation use the same Linux-only prepara
 test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
   const optional = {
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
-    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
+    "ci.yml": ["runner-storage-", "native-crash-linux-", "linux-idle-resources-", "test-timing-", "macos-remaining-producer-log-"],
     "linux-workspace-consumer.yml": ["native-crash-linux-", "runner-storage-"],
     "sanitizers.yml": ["runner-storage-", "asan-build-diagnostics-"],
     "mutants.yml": ["runner-storage-"],
@@ -867,7 +867,7 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16\]'\n      shard_total: 16/);
   assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
   assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
   assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
@@ -963,4 +963,38 @@ test("macOS native notification coverage is appended once after defaults and bef
   assert.ok(native.indexOf("name: Test + coverage (macOS)") < native.indexOf("name: Verify native notification"));
   assert.ok(native.indexOf("name: Verify native notification") < native.indexOf("name: Upload coverage to Codecov"));
   assert.match(native, /--test-concurrency=1 [^\n]*scripts\/ci\/notification-native\.test\.mjs/u);
+});
+
+test("Linux archive consumers reuse the producer's pinned tools across consumer attempts", () => {
+  const producer = read("ci.yml");
+  const consumer = read("linux-workspace-consumer.yml");
+  assert.match(producer, /toolsArtifactId: \$\{\{ steps\.validation_tools\.outputs\.artifact-id \}\}/u);
+  assert.match(consumer, /artifact-ids: \$\{\{ inputs\.tools_artifact_id \}\}/u);
+  assert.match(consumer, /sha256sum --check --strict SHA256SUMS/u);
+  assert.match(consumer, /diff -u identity/u);
+  assert.doesNotMatch(consumer, /taiki-e\/install-action/);
+  assert.match(consumer, /install -m 0755 "\$tools\/cargo-nextest" "\$tools\/cargo-llvm-cov" "\$cargo_bin\/"/u);
+  assert.match(consumer, /cargo-nextest" --version/);
+  assert.match(consumer, /cargo-llvm-cov" llvm-cov --version/u);
+});
+
+
+test("Linux sealed tool identity permits a consumer rerun without accepting another source or run", () => {
+  const consumer = read("linux-workspace-consumer.yml");
+  const validation = consumer.match(/          # Validate producer attempt[\s\S]*?          # End producer attempt validation/u)?.[0];
+  assert.ok(validation, "producer attempt validation must be present");
+  const script = "set -e\n" + validation.replace(/^          /gm, "");
+  const sha = "a".repeat(40);
+  for (const [identity, expected] of [
+    [`${sha} 123 1`, 0], [`${sha} 123 2`, 0],
+    [`${sha} 123 3`, 1], [`${sha} 456 1`, 1],
+    [`${"b".repeat(40)} 123 1`, 1], [`${sha} 123 0`, 1],
+    [`${sha} 123 999999999999999999999999999999`, 1], [`${sha} 123 invalid`, 1], [`${sha} 123 1 extra`, 1],
+  ]) {
+    const result = spawnSync("bash", ["-c", script.replace("< identity", "<<< \"$TEST_IDENTITY\"").replace("diff -u identity", "diff -u <(printf '%s\\n' \"$TEST_IDENTITY\")")], {
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_SHA: sha, GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", TEST_IDENTITY: identity },
+    });
+    assert.equal(result.status === 0 ? 0 : 1, expected, `${identity}: ${result.stderr}`);
+  }
 });

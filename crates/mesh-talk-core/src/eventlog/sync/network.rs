@@ -4,27 +4,7 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-/// Scalar metadata from a finite owned view or an exactly qualified probe cache.
-/// This grants no Have/export authority. A missing fingerprint skips the optional
-/// probe; it never denotes an empty set.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SyncMetadata {
-    pub count: u64,
-    pub channel_v2: bool,
-    pub channel_v3: bool,
-    pub channel_v4: bool,
-    pub channel_v5: bool,
-    pub fingerprint: Option<[u8; 32]>,
-}
-
-/// Local scheduling evidence for a completed quiet remote subset, never equality,
-/// custody or delivery. The issuing backend must revalidate the opaque local token.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QuietComparison {
-    pub local_token: [u8; 32],
-    pub remote_fingerprint: [u8; 32],
-    pub remote_count: u64,
-}
+pub use mesh_talk_protocol::legacy_round::{QuietComparison, SyncMetadata};
 
 /// Work includes rejected rows and graph edges, not just selected output. The
 /// transport releases the store lock and yields after each preparation step.
@@ -129,6 +109,21 @@ pub struct ExportPage<C> {
     pub allocated_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestedExportStatus {
+    Unsupported,
+    Preparing,
+    More,
+    Complete,
+}
+pub struct RequestedExport {
+    pub status: RequestedExportStatus,
+    pub events: Vec<Event>,
+    pub unavailable: Vec<EventId>,
+    pub consumed: usize,
+    pub work: PreparationStep,
+}
+
 /// A source cutoff freezes membership, never authorization. Every selector and
 /// `validate_view` must check current destructive/authority bindings. Views own
 /// leases and scalar context, never a borrowed lock/transaction or all history.
@@ -138,6 +133,31 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Cheap scope qualification before allocating a signed-chunk export view.
+    fn supports_file_chunk_scope(&self, _file: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+
+    fn available_file_chunks(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _start: u32,
+        _count: u32,
+    ) -> Result<Option<Vec<bool>>, LogError> {
+        Ok(None)
+    }
+
+    /// Export one signed chunk from a fully prepared outgoing view.
+    fn export_file_chunk(
+        &self,
+        _view: &Self::View,
+        _author: crate::eventlog::Author,
+        _index: u32,
+        _encoded_limit: usize,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
     /// Qualify optional node-owned preparation reuse with the actual authenticated
     /// peer. Cached plans grant no remote outcome or custody authority.
     fn bind_session_peer(&mut self, _peer: &crate::identity::device::PublicIdentity) {}
@@ -186,9 +206,11 @@ pub trait NetworkSyncStore {
         Ok(())
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
-    /// Optionally transfer an exclusively owned, currently qualified prepared
-    /// view to the caller. It must not share mutable export/Have state with any
-    /// other request. A miss uses ordinary bounded authorization preparation.
+    /// Optionally transfer an exclusively owned view with a qualified owner and
+    /// authorization binding. Retained range work may still be partially prepared:
+    /// finish `prepare_view_step` unless `reusable_view` qualifies current readiness.
+    /// Mutable export/Have state must not be shared with another request. A miss
+    /// uses ordinary bounded authorization preparation.
     fn take_custody_view(
         &mut self,
         _conversation: &ConversationId,
@@ -281,6 +303,82 @@ pub trait NetworkSyncStore {
         after: Option<&Self::HaveCursor>,
         budget: IdPageBudget,
     ) -> Result<SyncPage<EventId, Self::HaveCursor>, LogError>;
+    fn ordered_repair_page(
+        &self,
+        _view: &Self::View,
+        _after: i64,
+        _anchors: &[EventId],
+        _budget: ExportPageBudget,
+    ) -> Result<Option<(Vec<Event>, i64, bool)>, LogError> {
+        Ok(None)
+    }
+    fn requested_export(
+        &self,
+        _view: &Self::View,
+        _targets: &[EventId],
+        _budget: ExportPageBudget,
+        _preparation: PreparationBudget,
+    ) -> Result<RequestedExport, LogError> {
+        Ok(RequestedExport {
+            status: RequestedExportStatus::Unsupported,
+            events: vec![],
+            unavailable: vec![],
+            consumed: 0,
+            work: PreparationStep::default(),
+        })
+    }
+    fn requested_inventory_page(
+        &self,
+        _view: &Self::View,
+        _after: Option<i64>,
+        _budget: IdPageBudget,
+    ) -> Result<Option<SyncPage<EventId, i64>>, LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
+    /// One finite recent-message page, never whole-conversation equality.
+    fn recent_page(
+        &self,
+        _view: &Self::View,
+        _cursor: Option<&[u8]>,
+        _records: usize,
+        _bytes: usize,
+    ) -> Result<RecentPage, LogError> {
+        Ok(RecentPage::status(RecentStatus::Unsupported))
+    }
+    fn range_prepare(
+        &self,
+        _view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeProgress, LogError> {
+        Ok(crate::eventlog::sync::range::RangeProgress::Unsupported)
+    }
+    fn range_receiver_prepare(
+        &self,
+        _view: &Self::View,
+    ) -> Result<crate::eventlog::sync::range::RangeReceiverProgress, LogError> {
+        Ok(crate::eventlog::sync::range::RangeReceiverProgress::Unsupported)
+    }
+    fn range_checkpoint(
+        &self,
+        _view: &Self::View,
+    ) -> Result<Option<crate::eventlog::sync::range::index::Checkpoint>, LogError> {
+        Ok(None)
+    }
+    fn range_reverse_required(&self) -> bool {
+        true
+    }
+    fn retain_range_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        self.retain_custody_view(view)
+    }
+    fn retain_range_checkpoint(
+        &self,
+        _view: &Self::View,
+        _checkpoint: crate::eventlog::sync::range::index::Checkpoint,
+    ) -> Result<(), LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
+    fn range_summary(&self, _view: &Self::View, _request: &[u8]) -> Result<Vec<u8>, LogError> {
+        Err(LogError::InvalidPageBudget)
+    }
     fn export_page(
         &self,
         view: &Self::View,
@@ -369,6 +467,298 @@ pub(crate) fn apply_received_events(
 mod tests {
     use super::*;
 
+    // A minimal third-party adapter implements only the mandatory seam. Its
+    // history methods deliberately fail if optional negotiation calls them.
+    #[derive(Default)]
+    struct MinimalAdapter {
+        revoked: std::cell::Cell<bool>,
+        validations: std::cell::Cell<usize>,
+        probes: std::cell::Cell<usize>,
+        drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    struct Lease(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl NetworkSyncStore for MinimalAdapter {
+        type View = Lease;
+        type HaveCursor = ();
+        type ExportCursor = ();
+        fn open_view(&self, _: &ConversationId) -> Result<Lease, LogError> {
+            Ok(Lease(self.drops.clone()))
+        }
+        fn metadata(&self, _: &Lease) -> Result<SyncMetadata, LogError> {
+            panic!("optional capability negotiation must not read history metadata")
+        }
+        fn validate_view(&self, _: &Lease) -> Result<(), LogError> {
+            self.validations.set(self.validations.get() + 1);
+            if self.revoked.get() {
+                Err(LogError::StaleCursor)
+            } else {
+                Ok(())
+            }
+        }
+        fn have_page(
+            &self,
+            _: &Lease,
+            _: Option<&()>,
+            _: IdPageBudget,
+        ) -> Result<SyncPage<EventId, ()>, LogError> {
+            panic!("optional capability negotiation must not enumerate IDs")
+        }
+        fn export_page(
+            &self,
+            _: &Lease,
+            _: &HashSet<EventId>,
+            _: Option<&()>,
+            _: ExportPageBudget,
+        ) -> Result<ExportPage<()>, LogError> {
+            panic!("optional capability negotiation must not collect bodies")
+        }
+        fn ingest(&mut self, _: Event) -> Result<AppendOutcome, LogError> {
+            panic!("optional capability negotiation must not mutate history")
+        }
+        fn durable_have(&self, _: &ConversationId, _: &EventId) -> Result<bool, LogError> {
+            self.probes.set(self.probes.get() + 1);
+            Ok(true)
+        }
+        fn file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<FileConsentStatus, LogError> {
+            panic!("optional capability negotiation must not infer consent")
+        }
+        fn signed_file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<Option<Event>, LogError> {
+            panic!("optional capability negotiation must not infer consent")
+        }
+        fn admission_denied(&self) -> bool {
+            false
+        }
+    }
+
+    fn export_budget() -> ExportPageBudget {
+        ExportPageBudget {
+            examined: 1,
+            events: 1,
+            encoded_bytes: 1024,
+            allocated_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn minimal_adapter_opts_out_of_extensions_without_collecting_or_acknowledging_history() {
+        use crate::eventlog::sync::range::{RangeProgress, RangeReceiverProgress};
+        let mut adapter = MinimalAdapter::default();
+        let scope = ConversationId::new([1; 32]);
+        let view = adapter.open_view(&scope).unwrap();
+        let have = HashSet::new();
+        assert!(adapter.probe_metadata(&scope).unwrap().is_none());
+        assert!(adapter.quiet_comparison(&scope).unwrap().is_none());
+        assert!(adapter.quiet_comparison_token(&view).unwrap().is_none());
+        let hint = QuietComparison {
+            local_token: [2; 32],
+            remote_fingerprint: [3; 32],
+            remote_count: 0,
+        };
+        adapter.retain_quiet_comparison(&view, hint).unwrap();
+        assert!(!adapter.validate_quiet_comparison(&scope, hint).unwrap());
+        assert!(adapter.quiet_comparison(&scope).unwrap().is_none());
+        assert!(!adapter.reusable_view(&view).unwrap());
+        assert!(!adapter.reusable_export(&view, &have).unwrap());
+        assert!(adapter.export_preparation_needs_have(&view).unwrap());
+        assert!(adapter.take_custody_view(&scope).unwrap().is_none());
+        assert!(matches!(
+            adapter.range_prepare(&view).unwrap(),
+            RangeProgress::Unsupported
+        ));
+        assert!(matches!(
+            adapter.range_receiver_prepare(&view).unwrap(),
+            RangeReceiverProgress::Unsupported
+        ));
+        assert!(adapter.range_checkpoint(&view).unwrap().is_none());
+        assert!(adapter.range_reverse_required());
+        assert!(matches!(
+            adapter.range_summary(&view, b"unnegotiated"),
+            Err(LogError::InvalidPageBudget)
+        ));
+        let index = crate::eventlog::sync::range::index::RangeIndex::default();
+        let checkpoint = crate::eventlog::sync::range::index::Checkpoint::for_remote(
+            [1; 32], [2; 32], &index, 0,
+        );
+        assert!(matches!(
+            adapter.retain_range_checkpoint(&view, checkpoint),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert!(matches!(
+            adapter.requested_inventory_page(
+                &view,
+                None,
+                IdPageBudget {
+                    ids: 1,
+                    examined: 1
+                }
+            ),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert!(
+            adapter
+                .ordered_repair_page(&view, 0, &[], export_budget())
+                .unwrap()
+                .is_none()
+        );
+        let requested = adapter
+            .requested_export(
+                &view,
+                &[EventId::new([4; 32])],
+                export_budget(),
+                PreparationBudget::default(),
+            )
+            .unwrap();
+        assert_eq!(requested.status, RequestedExportStatus::Unsupported);
+        assert!(requested.events.is_empty() && requested.unavailable.is_empty());
+        assert_eq!(
+            requested.consumed, 0,
+            "unsupported export cannot acknowledge a target"
+        );
+        assert!(!requested.work.ready);
+        assert_eq!(
+            (
+                requested.work.rows,
+                requested.work.edges,
+                requested.work.bytes
+            ),
+            (0, 0, 0)
+        );
+        let recent = adapter.recent_page(&view, None, 200, 60 * 1024).unwrap();
+        assert_eq!(recent.status, RecentStatus::Unsupported);
+        assert!(recent.events.is_empty() && recent.next.is_none());
+        assert_eq!(recent.examined, 0);
+        assert_eq!(adapter.validations.get(), 0);
+        assert_eq!(adapter.probes.get(), 0);
+        let returned = adapter
+            .retain_range_view(view)
+            .unwrap()
+            .expect("unsupported retention returns ownership to caller");
+        assert_eq!(adapter.drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(returned);
+        assert_eq!(adapter.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn default_preparation_rechecks_revocation_before_exact_custody_and_never_reuses_a_view() {
+        let adapter = MinimalAdapter::default();
+        let scope = ConversationId::new([1; 32]);
+        let view = adapter.open_view(&scope).unwrap();
+        let have = HashSet::new();
+        let valid = PreparationBudget::default();
+        for invalid in [
+            PreparationBudget { rows: 0, ..valid },
+            PreparationBudget { edges: 0, ..valid },
+            PreparationBudget { bytes: 0, ..valid },
+        ] {
+            assert!(matches!(
+                adapter.prepare_view_step(&view, invalid),
+                Err(LogError::InvalidPageBudget)
+            ));
+            assert!(matches!(
+                adapter.reset_export_step(&view, invalid),
+                Err(LogError::InvalidPageBudget)
+            ));
+            assert!(matches!(
+                adapter.prepare_export_step(&view, &have, invalid),
+                Err(LogError::InvalidPageBudget)
+            ));
+        }
+        assert_eq!(
+            adapter.validations.get(),
+            0,
+            "invalid work budgets must fail before touching the adapter"
+        );
+        for step in [
+            adapter.prepare_view_step(&view, valid).unwrap(),
+            adapter.reset_export_step(&view, valid).unwrap(),
+            adapter.prepare_export_step(&view, &have, valid).unwrap(),
+        ] {
+            assert!(step.ready);
+            assert_eq!((step.rows, step.edges, step.bytes), (0, 0, 0));
+        }
+        adapter
+            .stage_export_have(&view, &[EventId::new([4; 32])])
+            .unwrap();
+        assert!(
+            adapter
+                .durable_have_in_view(&view, &scope, &EventId::new([4; 32]))
+                .unwrap()
+        );
+        assert_eq!(adapter.probes.get(), 1);
+        adapter.revoked.set(true);
+        assert!(matches!(
+            adapter.prepare_view_step(&view, valid),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            adapter.reset_export_step(&view, valid),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            adapter.prepare_export_step(&view, &have, valid),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            adapter.stage_export_have(&view, &[]),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            adapter.durable_have_in_view(&view, &scope, &EventId::new([4; 32])),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            adapter.probes.get(),
+            1,
+            "revoked views must never reach the durable storage probe"
+        );
+        assert!(!adapter.reusable_view(&view).unwrap());
+    }
+
+    #[test]
+    fn preparation_byte_budget_limits_rows_and_rejects_an_unfittable_record() {
+        let budget = PreparationBudget {
+            rows: 4,
+            edges: 8,
+            bytes: 65,
+        };
+        assert_eq!(budget.rows_for_bytes(32).unwrap(), 2);
+        assert_eq!(budget.rows_for(32).unwrap(), 2);
+        assert_eq!(budget.rows_for(1).unwrap(), 4);
+        assert!(matches!(
+            budget.rows_for_bytes(66),
+            Err(LogError::PageBudgetTooSmall { required: 66 })
+        ));
+        assert!(matches!(
+            PreparationBudget {
+                rows: usize::MAX,
+                ..budget
+            }
+            .validate(),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert!(matches!(
+            PreparationBudget {
+                edges: usize::MAX,
+                ..budget
+            }
+            .validate(),
+            Err(LogError::InvalidPageBudget)
+        ));
+    }
+
     #[test]
     fn explicit_budgets_reject_zero_overflow_and_oversized_have() {
         for budget in [
@@ -425,5 +815,31 @@ mod tests {
         };
         assert!(page.items.is_empty());
         assert!(page.next.is_some());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecentStatus {
+    Ready,
+    More,
+    Blocked,
+    Unsupported,
+    Reset,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RecentPage {
+    pub status: RecentStatus,
+    pub events: Vec<Event>,
+    pub next: Option<Vec<u8>>,
+    pub examined: usize,
+}
+impl RecentPage {
+    pub fn status(status: RecentStatus) -> Self {
+        Self {
+            status,
+            events: vec![],
+            next: None,
+            examined: 0,
+        }
     }
 }

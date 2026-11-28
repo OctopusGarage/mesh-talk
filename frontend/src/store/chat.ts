@@ -1,3 +1,4 @@
+import { isNativeWindowMinimized } from "@/lib/nativeWindowVisibility";
 import {
   resetOutgoingMediaPreviews,
   pruneOutgoingMediaPreviews,
@@ -21,7 +22,7 @@ import {
   loadReceptionSnapshot,
   saveReceptionSnapshot,
 } from "@/lib/receptionSnapshot";
-import type { PersonalConversationState } from "@/lib/types";
+import type { NodeIdentity, PersonalConversationState } from "@/lib/types";
 import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
 import { stickerPackId, stickerById } from "@/lib/stickerPacks";
@@ -174,14 +175,7 @@ const BOOT_RECOVERY_INTERVAL_MS = 10_000;
 /** Both startup and full runtime identities bind persisted reception exactly once. */
 function applyVerifiedIdentity(
   set: Set,
-  identity: {
-    owner: string;
-    account_id: string;
-    device_id: string;
-    history_revision?: number;
-    supports_bounded_delivery?: boolean;
-    runtime_id?: string;
-  },
+  identity: NodeIdentity,
   ready: boolean,
 ) {
   const owner = identity.owner;
@@ -273,6 +267,7 @@ async function pollUntilReady(
   get: Get,
   isCancelled: () => boolean,
   singleAttempt = false,
+  waitForHint?: (timeout: number) => Promise<void>,
 ): Promise<boolean> {
   const deadline = performance.now() + BOOT_TIMEOUT_MS;
   while (performance.now() < deadline && !isCancelled()) {
@@ -393,9 +388,9 @@ async function pollUntilReady(
       if (isCancelled() || singleAttempt) return false;
       const remaining = deadline - performance.now();
       if (remaining <= 0) return false;
-      await new Promise((r) =>
-        setTimeout(r, Math.min(BOOT_POLL_MS, remaining)),
-      );
+      const retryAfter = Math.min(BOOT_POLL_MS, remaining);
+      if (waitForHint) await waitForHint(retryAfter);
+      else await new Promise((resolve) => setTimeout(resolve, retryAfter));
     }
   }
   return false;
@@ -786,8 +781,8 @@ const contactHistoryHints = createContactHistoryRefresh(requestContactRoster);
 function accountRosterProjection(peers: PeerInfo[]): string {
   return JSON.stringify(
     peers
-      .map(({ user_id, account_id, name, post_office }) =>
-        JSON.stringify([user_id, account_id, name, post_office]),
+      .map(({ user_id, account_id, name, post_office, online }) =>
+        JSON.stringify([user_id, account_id, name, post_office, online]),
       )
       .sort(),
   );
@@ -809,9 +804,29 @@ async function refreshRosterSnapshot(
   const request = get().rosterRequest + (presenceOnly ? 0 : 1);
   if (!presenceOnly) set({ rosterRequest: request });
   try {
+    // A qualified roster event already carries an exact-runtime identity with
+    // its peer snapshot. If it fails, distinguish lost runtime authority from
+    // an unavailable roster using the owning identity command.
+    let observed:
+      Awaited<ReturnType<typeof rosterPresenceApi.observeRoster>> | undefined;
+    if (presenceOnly && ticket) {
+      // Give synchronous event consumers a chance to retire this lease before
+      // requesting the shared snapshot.
+      await Promise.resolve();
+      if (!lease.current() || get().rosterRequest !== request || hasPending())
+        return;
+      try {
+        observed = (await ticket.read(lease.owner!)).value;
+      } catch {
+        if (!lease.current() || get().rosterRequest !== request || hasPending())
+          return;
+      }
+    }
     let identity;
     try {
-      identity = await readWithDeadline(() => chat.ownerIdentity(lease.owner!));
+      identity =
+        observed?.identity ??
+        (await readWithDeadline(() => chat.ownerIdentity(lease.owner!)));
     } catch {
       if (get().rosterRequest === request && !hasPending())
         set({ ready: false });
@@ -858,19 +873,9 @@ async function refreshRosterSnapshot(
     if (!publishedAccountRoster?.current()) publishedAccountRoster = null;
     // Keep full reads concurrent. Heartbeats first inspect cheap discovery facts;
     // route-only changes still publish peers without rereading account history/policy.
+    if (presenceOnly && ticket && !observed) return;
     const observedPeers = presenceOnly
-      ? ticket
-        ? await ticket.read(lease.owner!).then(({ value }) => {
-            if (
-              value.identity.owner !== lease.owner ||
-              value.identity.account_id !== identity.account_id ||
-              value.identity.device_id !== identity.device_id ||
-              value.identity.runtime_id !== identity.runtime_id
-            )
-              throw new Error("Roster source identity changed");
-            return value.peers;
-          })
-        : await readWithDeadline(() => chat.listPeers())
+      ? (observed?.peers ?? (await readWithDeadline(() => chat.listPeers())))
       : null;
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -920,7 +925,11 @@ async function refreshRosterSnapshot(
       ? Promise.resolve()
       : personalEffects.changed
         ? channelRefresh.invalidate()
-        : channelRefresh.ifDue();
+        : isNativeWindowMinimized() ||
+            (typeof document !== "undefined" &&
+              document.visibilityState === "hidden")
+          ? Promise.resolve()
+          : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     if (publishObservation) publishedRosterObservation = observation;
@@ -985,6 +994,7 @@ async function refreshRosterSnapshot(
         ],
         identity.history_revision,
         () => lease.current() && get().rosterRequest === request,
+        get().deliveryRuntime !== null,
       );
       if (!lease.current() || get().rosterRequest !== request || hasPending())
         return;
@@ -1225,6 +1235,22 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     // Load favorites only after the captured owner's identity boot succeeds.
     // Poll my_id until the node finishes opening (post-login KDF unlock takes a moment).
     let cancelled = false;
+    let pendingBootHint = false;
+    let wakeBoot: (() => void) | undefined;
+    const waitForBootHint = (timeout: number) => {
+      if (pendingBootHint) {
+        pendingBootHint = false;
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(() => wakeBoot?.(), timeout);
+        wakeBoot = () => {
+          clearTimeout(timer);
+          wakeBoot = undefined;
+          resolve();
+        };
+      });
+    };
     const bootRequest = get().bootRequest;
     void (async () => {
       const ok = await pollUntilReady(
@@ -1232,6 +1258,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         get,
         () =>
           cancelled || !lease.current() || get().bootRequest !== bootRequest,
+        false,
+        waitForBootHint,
       );
       if (ok && lease.current()) void get().loadFavorites();
       if (lease.current() && get().bootRequest === bootRequest)
@@ -1343,7 +1371,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
                   applyChatProfile(receipt.event);
                   break;
                 case "call":
-                  applyChatCallSignal(receipt.event);
+                  applyChatCallSignal(receipt.event, get().myId);
                   break;
                 case "progress":
                   applyChatFileProgress(receipt.event);
@@ -1509,6 +1537,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : 2000,
       },
     );
+    const stopChannelRecovery = startRecoveryRefresh(
+      () => {
+        if (lease.current() && get().ready) void channelRefresh.ifDue();
+      },
+      { background: false, intervalMs: null },
+    );
     const controlObservation = groupOperationObservation(rawSet, get);
     let controlTimer: ReturnType<typeof setTimeout> | undefined;
     const scheduleControl = () => {
@@ -1547,7 +1581,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     const applyInvalidation = (rawKind: unknown) => {
       const kind = receptionKinds({ kinds: [rawKind] })[0] ?? "state";
-      if (kind === "documents" || kind === "sync_status") {
+      if (
+        kind === "documents" ||
+        kind === "sync_status" ||
+        kind === "read_receipts"
+      ) {
         // Qualified producers changed no group/personal inputs. Existing auxiliary
         // readers retain their broad compatibility wake without a chat-wide scan.
         notifySyncInvalidation({
@@ -1593,16 +1631,41 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       if (kind !== "roster") void refreshGroupOperationIntents(rawSet, get);
     };
 
+    const matchesRuntime = (scope: ReceptionScope) => {
+      const state = get();
+      return (
+        lease.current() &&
+        scope.owner === lease.owner &&
+        scope.account_id === state.myAccountId &&
+        scope.device_id === state.myId &&
+        scope.runtime_id === state.deliveryRuntime
+      );
+    };
     const unlisten = subscribeNodeEvents({
       onReceptionWake: (scope) => {
+        // Runtime installation emits this wake. It can accelerate a fresh
+        // identity read, and only that read can confirm the current runtime.
         if (
           lease.current() &&
           scope.owner === lease.owner &&
-          scope.account_id === get().myAccountId &&
-          scope.device_id === get().myId &&
-          scope.runtime_id === get().deliveryRuntime
+          get().bootBusy &&
+          get().bootRequest === bootRequest
+        ) {
+          if (wakeBoot) wakeBoot();
+          else pendingBootHint = true;
+        }
+        if (matchesRuntime(scope)) wakeReception();
+      },
+      onRosterChanged: (scope) => {
+        // These hints only update the roster presentation. Activation uses a
+        // fresh snapshot, and durable receipt wakes have their own handler.
+        if (
+          get().ready &&
+          matchesRuntime(scope) &&
+          (typeof document === "undefined" ||
+            document.visibilityState !== "hidden")
         )
-          wakeReception();
+          applyInvalidation("roster");
       },
       onStateChanged: (e) => {
         const state = get();
@@ -1683,12 +1746,13 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         if (lease.current()) applyChatProfile(e);
       },
       onCallSignal: (e) => {
-        if (lease.current()) applyChatCallSignal(e);
+        if (lease.current()) applyChatCallSignal(e, get().myId);
       },
     });
 
     return () => {
       cancelled = true;
+      wakeBoot?.();
       delivery?.stop();
       stopReceptionObservation();
       flushReceptionPersistence();
@@ -1697,6 +1761,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       if (typeof document !== "undefined")
         document.removeEventListener?.("visibilitychange", flushReceipts);
       stopRosterRecovery();
+      stopChannelRecovery();
       stopControlObservation();
       stopControlDemand();
       if (controlTimer !== undefined) clearTimeout(controlTimer);

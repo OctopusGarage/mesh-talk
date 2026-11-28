@@ -38,10 +38,47 @@ I/O; OS disk events also do not measure physical NAND write amplification. CPU a
 network and actual energy where supported. Keep metrics collected in different
 windows separate. Store measurements in PR/CI artifacts, not this guide.
 
-An existing target miss requires recorded baseline and an owned follow-up; it is
-not permission to worsen the path or silently raise its budget. A target change
-requires comparable evidence and review. Migrations, catch-up and active media have
-separate bounded work budgets and progress evidence, not an unlimited exception.
+### Desktop acceptance
+
+Use the desktop CPU, retained-memory and startup figures above as optimization
+targets. A desktop change can be accepted above those figures when affected
+functional and recovery checks pass, there is no known blocking defect, and
+comparable measurements show no material regression against the platform's
+established baseline. Record the build, measurement conditions, observed gaps
+and any missing platform evidence in the PR or CI evidence.
+
+Treat reproducible freezes, data loss, broken recovery, unbounded growth and
+repeated work on unchanged inputs as defects. Investigate a sustained resource
+regression and attribute it before accepting a baseline change. Keep headless
+and post-office budgets in force. Migrations, catch-up and active media have
+their own bounded work budgets and progress evidence.
+
+## Headless post-office nodes
+
+Apply the headless CPU and private-memory targets to the dedicated post-office
+process, including its attributable helpers. A relay stays available to receive
+connections, serve mailbox requests and maintain required protocol leases while
+quiescent. Its steady idle work must remain bounded as retained ciphertext,
+offline participants and configured federation peers grow. An empty store alone
+cannot establish the retained-workload result.
+
+- At startup, restore only the indexes, authority and bounded cursors needed to
+  accept traffic. Keep migrations, backlog catch-up and recovery measurable
+  separately. Report time to accepting requests, peak memory and I/O.
+- In steady idle, wait for ingress, committed mailbox or topology changes and
+  the next real expiry, lease or retry deadline. Unchanged federation inventories,
+  empty drains and repeated unreachable peers must settle or back off. Sample
+  both an empty relay and a populated relay after warmup, including CPU, memory,
+  wakeups and disk writes. Observe the full hour to claim the write target.
+- Under traffic, measure delivery and custody latency, queue depth, memory,
+  CPU and I/O. Verify bounded batches, overload handling, restart recovery,
+  federation convergence and return to idle. Keep receipt meanings, retention,
+  authenticated scope and convergence guarantees intact.
+
+Use the existing [relay resource contracts](post-office-federation.md#indexed-relay-runtime-and-resource-bounds)
+and [event and scheduling owners](event-driven-design.md#schedule-work-by-purpose).
+Record platform, binary, topology, load, sampling window and missing evidence
+alongside every result.
 
 ## Apply to every feature
 
@@ -76,6 +113,14 @@ reproduction; never describe a passing correctness test as performance acceptanc
    user navigation and foreground activation. Schedule the next actual expiry or
    retry deadline. Empty success is not progress and must not keep a fast retry
    hot. Coalesce duplicate wakes; retain bounded dirty work while a task is busy.
+   Before adding a subscription or timer, use the [event-driven design guide](event-driven-design.md)
+   to locate the owning event and scheduling mechanisms. Reuse scoped watch
+   signals for projections that can read current state. Use the existing lifecycle owner for deadlines,
+   throttling, retries and periodic repair. Document the trigger, cancellation
+   boundary, missed-signal recovery and the reason for any recurring idle work.
+   Native reception alerts follow the core UI-generation watch and reserve a
+   one-shot delay only when a pending change arrives before the next allowed
+   observation. Durable reception remains independent.
    Pending work still owns its retry deadline. Suppress unchanged ordinary wakes
    using scheduling evidence, independently of successful completion; preserve
    explicit drivers and event-only progress when no timer owns continuation.
@@ -280,8 +325,11 @@ reproduction; never describe a passing correctness test as performance acceptanc
    to their own current expiry checks.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
-   Reuse expensive unchanged presentation work with bounded semantic keys. Locale
-   and fresh local calendar fields must still qualify date/time results; a cached
+   Reuse expensive unchanged presentation work with bounded semantic keys. Keep
+   renderer collection and row references when a refresh yields the same facts,
+   so store subscribers can skip rendering. Delivery projections still clear
+   obsolete observations and preserve terminal receipts.
+   Locale and fresh local calendar fields must still qualify date/time results; a cached
    formatter's original timezone must not pin later output. Cache display strings
    without retaining message identity or adding another timer.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
@@ -302,6 +350,18 @@ reproduction; never describe a passing correctness test as performance acceptanc
    evidence that the local source changed. Reuse the existing exclusively owned
    authorization selection across query phases while its complete source and
    policy qualification matches; recheck current authority before exporting.
+   Small authorization phases should consume the remaining allowance of one
+   preparation turn rather than force a network continuation per phase. Keep
+   aggregate rows, edges and bytes within the original turn budget, stop for a
+   shared owner with no progress, and flush selected rows before fingerprinting.
+   The `participant_small_dm_preparation_uses_remaining_turn_budget` regression
+   in [participant network tests](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+   bounds cold one-message preparation to two default-budget turns. Completed
+   export transitions debit the same remaining row/edge/byte allowance; a
+   blocked or partial phase still yields. Charged ready preparation reserves an
+   index operation slot before the next stage. The adjacent
+   `participant_empty_range_does_not_defer_zero_work_export_phases` control
+   requires an already-authorized empty range to avoid setup-only round trips.
    Own reusable derived indexes at the node/version lifetime; verify unchanged
    costs across fresh adapters and fresh sockets. Separate active-query admission
    from idle index quotas, discard finished reducers/payloads and retire extracted
@@ -328,12 +388,155 @@ reproduction; never describe a passing correctness test as performance acceptanc
    and stopped states. Release unused media and subscriptions. Prove reception,
    persistence and notifications survive before suspending a page. Actual work
    retains its permit until completion; stale owners cannot publish late results.
+   On Windows, page visibility can remain visible after native minimization.
+   Visible-only renderer polling observes the native window state and resumes
+   on restoration. Durable reception retains its own lifecycle.
+   Keep indefinite idle states such as discovery without peers visually static.
+   Verify that they do not schedule continuous animation frames or compositor
+   work. Use the [presence browser scenario](../frontend/e2e/person-presence.spec.ts)
+   and native renderer sampling when the state is shown by a desktop WebView.
+
+## Desktop resource monitor
+
+Open Diagnostics from the tray or sidebar and enable sampling in the Overview
+tab. Sampling uses the visible serial refresh owner at three-second intervals.
+Closing or hiding the panel, minimizing the window or turning sampling off
+releases its lease. An abandoned lease expires after five seconds without a
+refresh. The feature adds no collector, persistence or probe traffic. Sample
+baselines and traffic totals reset with each observation. The Overview also
+shows the desktop host readiness duration and, when the renderer acknowledges
+initial presentation, the elapsed time to that acknowledgement from the same
+launch clock. The acknowledgement measures preparation of the initial surface,
+which can be the sign-in screen. The ten-second visibility fallback produces
+no acknowledgement. Measure the first actionable conversation separately in
+startup acceptance. These startup milestones are available without sampling.
+
+- **CPU and memory** cover the desktop host and up to 31 descendants identified
+  by platform process data on macOS, Linux and Windows. CPU shows the change
+  in summed CPU time relative to one logical core. It needs two readings of
+  the same process identities within six seconds. Resident memory sums process
+  residency and can count shared pages more than once. OS-owned WebKit helpers
+  outside the process tree are outside this attribution. The panel shows each
+  observed process and retains one scalar peak for residency across complete
+  samples in the current observation.
+- **Writes** are cumulative for the currently observed processes. macOS and
+  Linux expose attributed disk-write bytes. Windows exposes logical process I/O
+  writes, which include other I/O. Missing counters display as unavailable.
+- **Connections** count live authenticated channel objects owned by the app.
+  Multiple channels can belong to a single peer. **Traffic** counts successful
+  encrypted application frames and their length prefixes during the sampling
+  lease. It excludes handshake bytes, discovery packets, media and TCP overhead.
+- **Rates** use two existing samples and their monotonic native timestamps,
+  captured after the sampler enters the blocking pool. Process write
+  rates require matching process identities and monotonic counters. Transport
+  rates require monotonic byte counters from the current observation. A
+  missing baseline, counter reset or interrupted interval leaves the rate
+  unavailable. The panel retains no time series.
+- **Peer latency** uses the last successful signed routed-discovery
+  request/reply measurement within its presence lifetime. The Peers tab
+  displays the sample age, or indicates that no recent RTT is available.
+
+The expandable **Message activity** view uses the same lease. Folded details
+stay unmounted. The native snapshot reads direct backlog only while message
+details are open. File receive observations reuse the manifest validated by the
+commit owner. Local acceptance is
+a newly committed outgoing intent. Outbox acceptance failures include validation,
+capacity and journal errors. A failed desktop command is also shown separately
+and can overlap an outbox failure. First authenticated direct receipts count
+once per logical message.
+Attempt timeouts and scheduled retries are exact-owner attempt outcomes; they
+do not turn pending messages into failed messages. Route restarts count exact
+active destinations cancelled on a changed route set. Direct storage and
+post-office custody count observed storage outcomes, independently of recipient
+receipts. The direct backlog covers the installed outbox. A busy writer or more
+than 1,024 entries can make the
+oldest age unavailable. Receipt latency uses the local message timestamp and
+fixed buckets from 50 ms through 10 seconds, with an overflow bucket. Clock
+rollback omits a latency sample.
+
+Newly committed private and group receipts show counts and bytes by text,
+sticker, media and attachment. Text uses body bytes, stickers use identifier
+bytes, and attachments use manifest-declared size. Catch-up is a subset.
+Recognized history and own-device arrivals roll into their own counters.
+Previously processed direct events are counted at the delivery deduplication
+boundary. Explicit attachment decisions count changes across equivalent signed
+offers.
+Verified incoming attachments use completed transfer evidence and verified
+payload size; multiple cards for the same retained transfer do not multiply
+it. The displayed verified throughput is bytes newly completed in the sample
+window. It can be bursty for large transfers. No message content, account
+identifiers or per-message sample history are retained. Group recipient delivery, route-specific delivery attribution and
+network retransmissions have separate meanings and must not be inferred from
+these aggregates.
+
+## Core business metric coverage
+
+Use the business owner below to choose the capture point. This inventory records
+coverage and gaps. A proposed metric needs an executable test at its owning
+boundary before it becomes a supported dashboard measure. The
+[event contract](event-driven-design.md#choose-the-right-kind-of-signal)
+distinguishes committed facts from coalesced wakes and observations.
+
+| Business area | Existing diagnostic evidence | Metrics to add and event owner |
+| --- | --- | --- |
+| Startup and profile lifecycle | Desktop host ready and initial interface preparation | Login outcome and time, authenticated runtime install, first actionable conversation, hydration duration, lock, logout and owner retirement. Use authentication results and the active [runtime installation owner](../src-tauri/src/chat_commands/state.rs), then the renderer's first usable state. Time user authorization independently. |
+| Routing, discovery and transport | Authentication channel count, encrypted application bytes, discovery RTT and route-related delivery cancellations | Successful and failed authenticated connects, reconnect duration, eligible route changes, presence lease expiry and time to recover. Record attempts at [session admission](../crates/mesh-talk-core/src/node/session_pool.rs) and route transitions at the authoritative [roster](../crates/mesh-talk-core/src/discovery/roster.rs). |
+| Direct and group messaging | Local acceptance, direct receipts, failures at acceptance, retry timeouts, direct backlog, fixed receipt latency buckets and received volume by type | Capture final expiration or cancellation where the owning delivery record retires. Time a nonempty backlog episode from recovery start to empty. Group recipient delivery requires qualified recipient evidence. Route-specific delivery latency requires the path that produced the accepted receipt. See [delivery](../crates/mesh-talk-core/src/node/delivery_runtime.rs). |
+| Attachments and inline media | Declared offer bytes, approval or decline, verified completions and interval volume | Transfer starts and terminal outcomes, retry or cancellation, active transfers, transfer age and time to verified completion. Use the transfer worker and [durable completion owner](../crates/mesh-talk-core/src/node/file_completion.rs). Keep network bytes, verified bytes and local save errors distinct. |
+| Calls | Transport activity; call transport itself is outside encrypted application frame totals | Offer, ring, answer, connection, timeout, user cancellation and disconnect outcomes from the [call state owner](../frontend/src/store/calls.ts). If needed, sample WebRTC quality while connected using the active call's existing ownership. Retain setup-time and active-call quality separately. |
+| Account and linked-device sync | Observed history, catch-up and own-device arrivals in the monitor | Accepted, unchanged, rejected or deferred pages and rows/bytes applied, catch-up/repair age, conflicts and retry counts. Capture from [account sync's apply boundary](../crates/mesh-talk-core/src/node/account_sync.rs). Record device linkage and key changes at their authenticated [linking owner](../crates/mesh-talk-core/src/node/linking.rs). |
+| Local history, search and storage | Process write samples | Search latency and outcome, empty/cancelled requests, bounded result counts, history page hydration, committed writes and retention/expiry rows and bytes. Capture search completion in [owner search](../src-tauri/src/owner_commands/search.rs) and cleanup outcome in [expiry](../crates/mesh-talk-core/src/node/expiry_policy.rs). |
+| Recovery and migration | Existing recovery validation and startup milestones | Backup/export/import and migration start, completion or failure, elapsed time, verified rows and bytes, resumptions and retired work. Reuse [recovery](../crates/mesh-talk-core/src/node/recovery.rs) results and validated progress checkpoints. |
+| Post-office mailboxes | Existing bounded diagnostic [mailbox work observations](../crates/mesh-talk-core/src/node/work_observation.rs) | Accepted, duplicate, rejected, expired and reclaimed envelopes, bytes held, queue depth and oldest eligible age, pull outcome and time to drain. Use the durable custody and cleanup owners in [post office](../crates/mesh-talk-core/src/postoffice/mod.rs). Relay counters describe opaque envelopes. |
+| Post-office federation | Relay work observations and existing reconciliation revisions | Session outcomes, committed pages and bytes, unchanged rounds, bounded retry age, expiry and convergence time. Use the [federation sync outcome](../crates/mesh-talk-core/src/postoffice/federation.rs) and existing history revision. Separate peer authorization failure from healthy idle. |
+| Integrations and updates | Existing operation state, audit and updater progress | Integration requests by fixed operation, allow/deny, rate limiting and result; update checks, download/verification/install outcome and duration. Reuse [integration dispatch](../crates/mesh-talk-integrations/src/service.rs) and [desktop update outcomes](../src-tauri/src/updates.rs). |
+
+### Capture and performance contract
+
+- Record work only at an owner that knows its outcome. Existing revision or
+  notification streams can wake a panel to read a summary, but their delivery
+  and coalescing behavior cannot establish counts or business success.
+- Reuse owner counters and monotonic elapsed times from completed operations.
+  For current state, use an existing bounded snapshot. Avoid copying payloads,
+  reopening databases, rescanning retained events or queuing one notification
+  per operation merely to produce statistics.
+- Keep fixed dimensions per process role and observation session. Useful
+  dimensions include operation class, direct/group, outcome, and trusted route
+  class when evidence provides it. Exclude contents, raw IDs and addresses.
+  Long-lived results may retain a bounded histogram and sample count. Separate
+  cancellations, retries, missing measurements and explicit failures.
+- The existing desktop observation lock serializes frame counters and business
+  totals while sampling is enabled. Treat it as a performance constraint before
+  adding high-frequency owners. Benchmark same-build off/on comparisons before
+  expanding the hot path. Prefer owner-local aggregation or batched publication
+  when contention is measurable. A late update from a retired observation must
+  not be applied to a new observation.
+- Keep relay measurements on the relay and desktop measurements on the
+  desktop. Reuse the existing visible serial refresh for desktop presentation
+  and existing relay diagnostic output or an explicit snapshot for headless
+  use. Do not start a background collector just to serve a dashboard.
+- Validate idle, burst, failure, duplicate/replay, scope retirement and
+  recovery. Measure disabled overhead and observer-on cost separately,
+  including CPU, wakeups, memory and business tail latency. Count success
+  against a correctness witness such as the authenticated receipt or verified
+  recovered bytes. A synthetic microbenchmark measures a code path, not the
+  cost of an entire installed app or relay.
 
 ## Evidence and maintenance
 
 Before optimizing, identify the owner and capture the offending operation count
 or allocation/CPU/write trace. Add a regression that fails on that mechanism,
 then validate empty/no-change, growth, failure/retry, cancellation and recovery.
+Isolate the native profile and the renderer's persistent storage together for
+each desktop fixture. On Windows, select a task-owned WebView2 user-data folder
+explicitly. Reusing browser storage with a copied or rolled-back native profile
+can carry a saved reception cursor from a different run. Check that the
+fixture's durable reception is healthy before classifying its work as idle.
+For Linux desktop measurements in a VM or container, place the writable
+profile and WebKit cache on a guest-native filesystem with free space.
+Keep host-shared mounts for read-only fixture inputs and exported evidence.
+Record the filesystem and cache conditions when comparing resource results.
+
 Compare the same device/build/runtime/profile; include whole-family resource
 measurements and a correctness witness. SQL affected-row counts do not measure
 write amplification: attribute pager flushes separately when they cannot explain
@@ -342,6 +545,26 @@ text, parameters and message content. IPC diagnostics count registered dispatch
 attempts by bounded command name, without arguments or results; they do not prove
 command completion or CPU attribution. Keep their collector and output disabled
 by default, and emit after releasing observation guards without adding a timer.
+Record startup timings at their actual milestone. The desktop log records
+`desktop_host_ready_ms` once when Tauri signals readiness after setup. Measure
+first usable UI, authentication and account hydration separately.
+For routine Linux feedback, use the [headless idle benchmark](evals/README.md#linux-headless-idle-resource-benchmark).
+Its short window and fresh profile are diagnostic. Compare the same runner and
+build profile before tightening budgets or using results for release acceptance.
+
+For macOS desktop attribution, confirm process membership from the launch
+cohort and app-scoped WebKit evidence. Record host and helper counters over the
+same elapsed interval. Use `sample` to identify active Rust and WebKit stacks
+and `vmmap -summary` to partition renderer memory into graphics, allocators and
+other mappings. Waiting threads dominate wall-stack counts, so those counts
+cannot apportion CPU time. Keep resident, compressed or swapped, and reserved
+bytes separate. Collect an isolated same-build empty-shell comparison and
+retaining paths before assigning renderer memory to specific application state.
+Inspect automation components for work that remains active between commands.
+The macOS WebDriver fixture installs a repeating main-run-loop pump for
+off-screen automation. Use its resource counters for matched fixture diagnostics
+and use the shipping entry point for the production idle budget.
+
 Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
 GC, cache deletion or moving pressure to disk do not prove a fix.
@@ -361,3 +584,157 @@ Primary references: [WebView2 performance](https://learn.microsoft.com/en-us/mic
 [Apple timer guidance](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/Timers.html),
 [Matrix incremental sync](https://spec.matrix.org/v1.19/client-server-api/#syncing),
 [TDLib cache reclamation](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1optimize_storage.html).
+
+### Compatibility group recovery budget
+
+Production `node::session::request_sync_turn_paged` negotiates bounded range turns.
+Only unsupported old peers use private `request_legacy_turn_paged`, capped at 200
+transferred events, 1 MiB encoded bodies and eight steps. Preparation yields after
+four bounded steps; mismatched Have inventory is limited to 2,000 IDs/eight frames.
+Cached equal fingerprints can finish without exchanging Have. Oversized responses
+are rejected before apply; interrupted legacy channels retire without completion
+evidence. The public `request_round_paged` is an explicit legacy drain API and is
+not the production default. Full repair eventually reconciles its authorized
+retained set through bounded turns. The separate recent-history profile selects
+at most 200 Message records with explicit continuation for older pages; it does
+not age-filter authorization, key or control history. No seven-day cutoff is
+implemented. Cold authorized preparation and index construction remain O(N) overall,
+spread across bounded turns; subsequent qualified ordinary appends reuse prefixes.
+
+### Indexed range preparation and continuation
+
+The new range profile owns no timer or perpetual task. Existing group recovery,
+delivery, metadata and network-input owners schedule its explicit More/Limited
+results. Source and receiver preparation each admit at most four pages with 250
+examined rows and 32 index insertions per page: together eight pages, 2,000 scans
+and at most 256 synchronous index insertions per host turn. These are operation
+ceilings, not measured wall-clock latency promises. Principal and export
+preparation share one original 64-row/512-edge/8 MiB allowance. Completed small
+phases may use its remaining allowance; a partial stage always yields. If ready
+preparation consumed work, it reserves one of the four source/receiver operation
+slots and index construction gets only three pages. Thus preparation plus index
+scans remain below the original 1,000-row ceiling per source/receiver; index
+insertions and combined host ceilings do not increase. Zero-work ready probes
+retain all four index pages.
+
+Production authorized range indexes now live in encrypted, disk-spilling
+participant SQL scratch, using its existing 8 MiB page cache instead of a full
+Rust ID tree. Canonical compressed branching/leaf rows are bounded by 2*N-1.
+A page inserts at most 32 IDs in one transaction; failure leaves the prior root
+unchanged. Queries use indexed key/first/last/leaf seeks, not full-set scans.
+Selection retirement and failed-builder reset reclaim rows in bounded slices;
+failed builders reuse their namespace instead of accumulating orphan generations.
+The prior process-wide 32 MiB RAM index admission ceiling therefore does not apply
+to production SQL indexes. The in-memory primitive still has explicit admission.
+
+Recent pages select at most 200 authorized Message IDs with descending indexed
+rank keysets and an immutable source cutoff, independently capped at 1,000 rows
+examined and 60 KiB encoded bodies. No OFFSET or full-history sort is used. The
+foreground action admits at most four preparation/page exchanges (eight RPCs)
+and stops at the first page, never follows older pages automatically. Preparing
+and missing-dependency states signal the existing recovery owner, not a new timer.
+No cold-start O(delta), unlimited disk or immediate ancestor-free rendering claim
+is made; source authorization preparation and causal repair remain required.
+
+Validation selectors: `range_` (including real production GuardedSyncStore and
+SecureChannel bidirectional/pool-refresh tests), `node::session::range_sync::tests`,
+`turn_budget_tests`, `bounded_sync_retry_tests` and `delta_transition_tests`.
+
+Legacy budget exhaustion can interrupt an old-peer exchange; that channel is
+retired and follows the existing transport retry policy. It is not recycled as a
+clean `Limited` range turn. New-profile `More`/`Limited` retain the explicit fair
+continuation/sparse-repair behavior described above.
+
+See [bounded synchronization verification](bounded-sync.md) for the
+verified runtime scope, test profile and remaining cold-index limitations.
+
+Retained range plans account heap separately from derived SQL storage: enforce
+32 MiB idle heap, use a 512 MiB soft disk LRU and permit one oversized SQL plan
+to progress. Cache charges must be indexed scalar lookups, not repeated COUNT
+or SUM scans. Cap pending and blocked range frontiers at 4,096. Negotiated
+ordered causal repair uses at most 32 dependency anchors and bounded ascending
+source-rank windows; it must not replay an entire old prefix for every warm gap
+or declare equality before a fresh Merkle check.
+Cold authority replay may require many continuations when the fixture or real
+source appends during preparation. Measure actual cursor advancement separately
+from the number of More responses; increasing a test's convergence allowance
+must never increase production per-turn limits.
+
+Account-group fanout retains the original journal revision across successful
+bounded turns. `More` uses the existing 500 ms continuation cadence without
+spending failure backoff; local admission/source/session failures keep their
+bounded exponential backoff, and `Limited` retains ownership for sparse repair.
+A custody answer qualifies one event, not completion of the control/history turn.
+Only the current owner schedules continuation, so account fanout does not also
+wake generic group recovery for the same unfinished exchange. Phase coalescing
+must yield before a remaining allowance falls below the next phase's minimum;
+it must never turn a valid full budget into an invalid sub-budget.
+
+Relay mailbox delta cutoffs use the mailbox's indexed maximum commit ordinal,
+not the event domain's global ordinal. An append to another mailbox therefore
+leaves a completed idle cursor unchanged without reading bodies or writing SQL.
+
+Ordinary signed-control replay also retains More/Limited in its existing pending
+sweep. Clean continuation uses 500 ms without spending failure backoff; blocked
+capacity uses sparse repair. A pass containing real failures keeps the existing
+failure policy. Completion alone removes that group's pending control work.
+
+Destination recovery separates positive remote storage evidence from signed
+recipient confirmation. After a fresh exact-event Have, subsequent unfinished
+receipt work uses the same bounded destination lane and scalar reference to pull
+only the pairwise control scope. It must not rehydrate or resend the original
+ciphertext just because a receipt turn is unfinished. Route-qualified storage
+hints expire after their original finite repair interval; reading or polling a
+receipt cannot renew that expiry. Quiet receipt polling must not park another
+queued message on the peer lane. Only validated signed recipient evidence retires
+recipient work as delivered.
+
+An adapter's durable-admission notification may dispatch accepted reception work
+before a protocol's final acknowledgement. Notifications coalesce; they do not
+add a periodic scanner or publish uncommitted invitation ancestry. Dispatch takes
+pending conversations after releasing the adapter guard, and cancellation keeps
+the existing reception owner until cleanup completes. Successfully completed
+framed turns update measured route timing before any separate custody probe;
+learned timing stays within the existing control deadline ceiling.
+
+Owner-authored invitations and policy controls retain a durable control replay
+row as other signed membership controls do. Manual retry and the bounded replay
+sweep use the same current-state eligibility rule. Clean More retains the existing
+continuation; it cannot silently discard an owner's unfinished control push.
+
+A fanout child can continue up to four clean bounded protocol turns on the normal
+500 ms cadence inside its original 15-second peer deadline. Protocol row, edge,
+record and byte limits remain per turn. Each peer progresses independently, so a
+stalled sibling task cannot hold another peer's preparation behind the fanout
+join. The finite batch returns More to its original owner when still unfinished;
+Limited and real failures retain their sparse repair/backoff paths. Member pulls
+use the same finite allowance only for preparation with no applied records; actual
+metadata admission returns immediately to the existing group recovery owner.
+
+A fresh exact Have uses completion-time presence/demand inputs when endpoints,
+relays and policy generation still match its admitted route. Expiry of a discovery
+heartbeat during a slow authenticated exchange must not immediately invalidate
+newly observed storage. A real route or authorization change still fences the hint.
+Accepted account-group devices retain signed-control retry eligibility separately
+from legacy post-invitation message cutoffs; retry must not invent such a cutoff.
+
+Preparing an already committed Ready selection is read-only. Parking may release
+its in-memory reducers, but a subsequent no-op preparation must not serialize that
+compact shell over the persisted classified/legacy resume capsule. Restoring a
+parked owner reloads the committed capsule before extending its finite source cut.
+Failed saves remain unready and follow the existing fail-closed reload path.
+
+Receipt collection can retain its authenticated stream across the same finite
+four-turn continuation batch. It releases the stream on completion, Limited,
+failure or cancellation, without reopening original-message history. Adaptive
+control timing includes the actually authenticated preferred endpoint even when
+the discovery winner still names an older route; the deadline ceiling is unchanged.
+
+A sharing-disabled device can publish its current own signed public replica
+preference as one existing Followup record, followed by an exact storage query.
+This requests no inventory or history. Source identity, current group/account
+membership, privacy and the canonical preference ID are checked; recipients still
+validate signature, scope and causal parents. Missing ancestry or unsupported peers
+leave work pending. Its storage answer never settles another group effect or
+proves effective canonical preference. An unsupported reverse range export finishes
+the forward MRF/MRA exchange and reports Limited rather than cycling through More.

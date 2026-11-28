@@ -20,6 +20,13 @@ const { historyApi, dialog } = vi.hoisted(() => ({
         sticker: null,
       },
     ]),
+    fetchChannelHistoryPage: vi.fn(
+      async (_id: string, _cursor: string | null) => ({
+        status: "page",
+        applied: 0,
+        cursor: "older" as string | null,
+      }),
+    ),
     channelHistory: vi.fn(async () => {
       throw new Error("offline");
     }),
@@ -145,6 +152,129 @@ it("removes an expired row from an already open history dialog", async () => {
     dialog.now += 60_001;
     await act(async () => root.render(view()));
     expect(container.textContent).not.toContain("temporary history");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("requests one recent page and only fetches older on an explicit click", async () => {
+  historyApi.fetchChannelHistoryPage.mockClear();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ConversationHistoryDialog, {
+          conversation: { kind: "channel", id: "group", name: "Group" },
+        }),
+      ),
+    );
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(historyApi.fetchChannelHistoryPage.mock.calls).toEqual([
+      ["group", null],
+    ]);
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Load older messages",
+    )!;
+    await act(async () => button.click());
+    expect(historyApi.fetchChannelHistoryPage.mock.calls).toEqual([
+      ["group", null],
+      ["group", "older"],
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("does not retry preparing automatically or refresh after closing", async () => {
+  historyApi.fetchChannelHistoryPage.mockClear();
+  historyApi.fetchChannelHistoryPage.mockResolvedValueOnce({
+    status: "preparing",
+    applied: 0,
+    cursor: null,
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ConversationHistoryDialog, {
+          conversation: { kind: "channel", id: "group", name: "Group" },
+        }),
+      ),
+    );
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(historyApi.fetchChannelHistoryPage).toHaveBeenCalledTimes(1);
+    let finish!: (page: {
+      status: string;
+      applied: number;
+      cursor: string | null;
+    }) => void;
+    historyApi.fetchChannelHistoryPage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Retry history request",
+    )!;
+    await act(async () => retry.click());
+    await act(async () => dialog.onOpenChange?.(false));
+    const reads = historyApi.channelHistory.mock.calls.length;
+    await act(async () =>
+      finish({ status: "page", applied: 1, cursor: "older" }),
+    );
+    expect(historyApi.channelHistory.mock.calls.length).toBe(reads);
+    expect(historyApi.fetchChannelHistoryPage).toHaveBeenCalledTimes(2);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("offers a fresh recent retry after navigating beyond a blocked gap", async () => {
+  historyApi.fetchChannelHistoryPage.mockClear();
+  historyApi.fetchChannelHistoryPage
+    .mockResolvedValueOnce({
+      status: "blocked",
+      applied: 0,
+      cursor: "older-gap",
+    })
+    .mockResolvedValueOnce({ status: "page", applied: 1, cursor: null })
+    .mockResolvedValueOnce({ status: "page", applied: 1, cursor: null });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const click = async (label: string) =>
+    act(async () =>
+      Array.from(container.querySelectorAll("button"))
+        .find((b) => b.textContent === label)!
+        .click(),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ConversationHistoryDialog, {
+          conversation: { kind: "channel", id: "group", name: "Group" },
+        }),
+      ),
+    );
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(historyApi.fetchChannelHistoryPage.mock.calls).toEqual([
+      ["group", null],
+    ]);
+    await click("Load older messages");
+    expect(historyApi.fetchChannelHistoryPage.mock.calls).toEqual([
+      ["group", null],
+      ["group", "older-gap"],
+    ]);
+    expect(container.textContent).toContain("Retry recent messages");
+    await click("Retry recent messages");
+    expect(historyApi.fetchChannelHistoryPage.mock.calls).toEqual([
+      ["group", null],
+      ["group", "older-gap"],
+      ["group", null],
+    ]);
+    expect(container.textContent).not.toContain("Retry recent messages");
   } finally {
     await act(async () => root.unmount());
   }

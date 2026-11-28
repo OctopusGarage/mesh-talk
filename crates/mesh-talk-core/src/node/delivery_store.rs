@@ -455,6 +455,23 @@ pub(crate) struct RequestRecord {
 }
 
 impl DeliveryTransaction {
+    pub(super) fn outgoing_expiry(&self) -> Option<(&OutgoingDelivery, u64, bool)> {
+        let (message, plaintext, manifest) = match self.body() {
+            Self::Outgoing { message, sent, .. } => (message, &sent.plaintext, false),
+            Self::OutgoingManifest {
+                message, received, ..
+            } => (message, &received.plaintext, true),
+            _ => return None,
+        };
+        let envelope = super::dm_envelope::DmEnvelope::decode_ref(plaintext);
+        let deadline = crate::expiry::deadline(
+            envelope
+                .as_ref()
+                .map_or(plaintext.as_slice(), |value| value.body),
+        )?;
+        Some((message, deadline, manifest || envelope.is_some()))
+    }
+
     pub(crate) fn body(&self) -> &Self {
         match self {
             Self::Requested { transaction, .. }
@@ -616,6 +633,7 @@ pub(crate) struct DeliveryStore {
     journal_path: PathBuf,
     outbox_path: PathBuf,
     pending: Vec<DeliveryTransaction>,
+    expiry_changes: tokio::sync::watch::Sender<()>,
     requests: BTreeMap<[u8; 32], RequestRecord>,
     messages: BTreeMap<EventId, OutgoingDelivery>,
     completed: BTreeMap<EventId, CompletedDelivery>,
@@ -1009,8 +1027,22 @@ impl DeliveryStore {
         preflight(&journal_path, limits.journal_bytes, limits.transactions)?;
         let max_records = limits.max_outbox_records();
         preflight(&outbox_path, limits.outbox_bytes, max_records)?;
-        let (journal, pending) = EncryptedRecordLog::open(&journal_path, password, JOURNAL_MAGIC)?;
-        let (outbox, records) = EncryptedRecordLog::open(&outbox_path, password, OUTBOX_MAGIC)?;
+        // The journal and outbox have separate file ownership. Complete
+        // both opens under the startup owner before cross-file replay.
+        let open_journal = || EncryptedRecordLog::open(&journal_path, password, JOURNAL_MAGIC);
+        let open_outbox = || EncryptedRecordLog::open(&outbox_path, password, OUTBOX_MAGIC);
+        let ((journal, pending), (outbox, records)) =
+            if journal_path.is_file() && outbox_path.is_file() {
+                let (journal, outbox) = std::thread::scope(|scope| {
+                    let outbox = scope.spawn(open_outbox);
+                    let journal = open_journal();
+                    (journal, outbox.join())
+                });
+                let outbox = outbox.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                (journal?, outbox?)
+            } else {
+                (open_journal()?, open_outbox()?)
+            };
         let mut store = Self {
             profile: None,
             journal,
@@ -1018,6 +1050,7 @@ impl DeliveryStore {
             journal_path,
             outbox_path,
             pending: Vec::new(),
+            expiry_changes: tokio::sync::watch::channel(()).0,
             requests: BTreeMap::new(),
             messages: BTreeMap::new(),
             completed: BTreeMap::new(),
@@ -1348,6 +1381,7 @@ impl DeliveryStore {
         };
         self.check_capacity(destinations, bytes)?;
         let id = tx.id();
+        let has_expiry = tx.outgoing_expiry().is_some();
         self.pending.push(tx);
         // Stage the reservation only under the owner lock. On any pre-WAL
         // failure remove it again; it is never visible as accepted work.
@@ -1371,6 +1405,9 @@ impl DeliveryStore {
             self.pending.pop();
             return Err(error);
         }
+        if has_expiry {
+            self.expiry_changes.send_replace(());
+        }
         Ok(id)
     }
 
@@ -1384,8 +1421,27 @@ impl DeliveryStore {
             })
     }
 
+    /// Journal commits are separate from the indexed profile database.
+    pub(in crate::node) fn subscribe_expiry_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.expiry_changes.subscribe()
+    }
+
     pub(crate) fn pending_transactions(&self) -> &[DeliveryTransaction] {
         &self.pending
+    }
+
+    /// Installed direct delivery work only. Avoid scanning a large outbox for diagnostics.
+    pub(crate) fn diagnostic_backlog(&self) -> (usize, Option<u64>) {
+        let count = self.messages.len();
+        let oldest = if count <= 1024 {
+            self.messages
+                .values()
+                .map(|message| message.wall_clock)
+                .min()
+        } else {
+            None
+        };
+        (count, oldest)
     }
 
     pub(crate) fn status(&self, id: EventId) -> Option<DeliveryStatus> {
@@ -1965,6 +2021,16 @@ impl DeliveryStore {
         final_chunk: EventId,
     ) -> Result<(), LogError> {
         self.install_record(OutboxRecord::FileComplete(card, final_chunk))
+    }
+
+    pub(crate) fn has_completed_transfer(
+        &self,
+        conversation: ConversationId,
+        final_chunk: EventId,
+    ) -> bool {
+        self.completion_index
+            .get(&(*conversation.as_bytes(), final_chunk))
+            .is_some_and(|ids| !ids.is_empty())
     }
 
     pub(crate) fn completed_files(

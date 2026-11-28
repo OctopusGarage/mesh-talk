@@ -31,9 +31,10 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
         && value.observer.certificate.device_ed25519_pub == value.observer.public.ed25519_pub
         && value.observer.certificate.account_ed25519_pub == meta.account_public
         && value.holder.user_id() == holder.strip_prefix("relay:").unwrap_or(holder)
-        && value.holder_certificate.as_ref().is_none_or(|certificate| {
-            certificate.verify() && certificate.device_ed25519_pub == value.holder.ed25519_pub
-        })
+        && value
+            .holder_certificate
+            .as_ref()
+            .is_none_or(|certificate| certificate.verify_for_device(&value.holder.ed25519_pub))
         && value.post_office == holder.starts_with("relay:")
 }
 

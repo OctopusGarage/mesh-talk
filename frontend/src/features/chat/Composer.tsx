@@ -1,3 +1,4 @@
+import { decodeCodeBlock, encodeCodeBlock } from "@/lib/codeBlock";
 import {
   Popover,
   PopoverContent,
@@ -8,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposerImagePreview } from "./ComposerImagePreview";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Code2,
   SendHorizontal,
   X,
   CornerUpLeft,
@@ -16,6 +18,7 @@ import {
   Smile,
   Sticker as StickerIcon,
   Camera,
+  Mic,
   ScanLine,
   Image as ImageIcon,
   Plus,
@@ -38,6 +41,25 @@ import {
   AttachmentBatchError,
   removeHandedOffFiles,
 } from "./attachments/attachmentBatch";
+
+const CODE_LANGUAGES = [
+  "javascript",
+  "typescript",
+  "python",
+  "rust",
+  "go",
+  "java",
+  "c",
+  "cpp",
+  "csharp",
+  "json",
+  "html",
+  "css",
+  "sql",
+  "bash",
+  "yaml",
+  "markdown",
+];
 
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
 const EMOJIS = [
@@ -113,6 +135,7 @@ export function Composer({
   onDraftChange,
   onAttach,
   onCamera,
+  onVoice,
   onAttachDirectory,
   onPasteFiles,
   onScreenshot,
@@ -146,6 +169,7 @@ export function Composer({
   ) => void;
   onDraftChange?: (text: string) => void;
   onCamera?: () => void;
+  onVoice?: () => void;
   onAttach?: () => void;
   onAttachDirectory?: () => void;
   /** Send copied files after the user presses Enter or Send. */
@@ -193,6 +217,7 @@ export function Composer({
   );
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
+  const codeBlock = useMemo(() => decodeCodeBlock(text), [text]);
   const [protection, setProtection] = useState<
     import("@/lib/types").MessageProtection | undefined
   >(initialProtection);
@@ -417,7 +442,7 @@ export function Composer({
       return;
     }
     const candidate = text.trim();
-    if (!candidate) return;
+    if (!candidate || (codeBlock && !codeBlock.code.trim())) return;
     const epoch = sendEpoch.current;
     const revision = draftRevision.current;
     const current = () =>
@@ -473,6 +498,7 @@ export function Composer({
     // can emit compositionend first, so its confirming keydown needs the 229 fallback.
     const nativeEvent = "nativeEvent" in e ? e.nativeEvent : e;
     if (nativeEvent.isComposing || nativeEvent.keyCode === 229) return;
+    if (codeBlock) return;
     if (suggestions.length > 0 && e.key === "Enter") {
       e.preventDefault();
       applyMention(suggestions[0]);
@@ -508,7 +534,7 @@ export function Composer({
   // Desktop clipboards often include the filename as text too; consume that only when
   // actual file bytes are present. Ordinary text paste still uses the browser default.
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!onPasteFiles) return;
+    if (codeBlock || !onPasteFiles) return;
     const files = clipboardFiles(e.clipboardData);
     if (!files.length) return;
     e.preventDefault();
@@ -521,11 +547,15 @@ export function Composer({
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
     setSendRejected(false);
-    setDraftText(el.value);
-    onDraftChange?.(el.value);
+    const next = codeBlock
+      ? encodeCodeBlock(el.value, codeBlock.language)
+      : el.value;
+    setDraftText(next);
+    onDraftChange?.(next);
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-    detectMention(el.value, el.selectionStart ?? el.value.length);
+    el.style.height = `${Math.min(el.scrollHeight, codeBlock ? 256 : 160)}px`;
+    if (!codeBlock)
+      detectMention(el.value, el.selectionStart ?? el.value.length);
   };
 
   return (
@@ -939,7 +969,11 @@ export function Composer({
               <ScanLine className="h-4 w-4" />
             </Button>
           )}
-          {(onAttach || onImage || onCamera || onAttachDirectory) && (
+          {(onAttach ||
+            onImage ||
+            onCamera ||
+            onVoice ||
+            onAttachDirectory) && (
             <Popover>
               <PopoverTrigger asChild>
                 <Button
@@ -972,6 +1006,13 @@ export function Composer({
                     label: t("cameraCapture.title"),
                     id: "composer-camera",
                     blocked: false,
+                  },
+                  {
+                    action: onVoice,
+                    icon: Mic,
+                    label: t("voiceCapture.title"),
+                    id: "composer-voice",
+                    blocked: !!protection,
                   },
                   {
                     action: onAttach,
@@ -1028,6 +1069,41 @@ export function Composer({
           </Button>
         </div>
 
+        {codeBlock && (
+          <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            <label className="sr-only" htmlFor="composer-code-language">
+              {t("codeBlock.language")}
+            </label>
+            <select
+              id="composer-code-language"
+              aria-label={t("codeBlock.language")}
+              className="max-w-28 rounded border bg-background p-1 text-xs"
+              value={codeBlock.language}
+              onChange={(event) => {
+                const next = encodeCodeBlock(
+                  codeBlock.code,
+                  event.target.value,
+                );
+                setDraftText(next);
+                onDraftChange?.(next);
+              }}
+            >
+              <option value="">{t("codeBlock.plainText")}</option>
+              {!CODE_LANGUAGES.includes(codeBlock.language) &&
+                codeBlock.language && (
+                  <option value={codeBlock.language}>
+                    {codeBlock.language}
+                  </option>
+                )}
+              {CODE_LANGUAGES.map((language) => (
+                <option key={language} value={language}>
+                  {language}
+                </option>
+              ))}
+            </select>
+            <span>{t("codeBlock.hint")}</span>
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-lg border border-input bg-background p-1.5 transition-[border-color,box-shadow] duration-150 focus-within:border-signal focus-within:ring-1 focus-within:ring-signal/20">
           <Button
             variant="ghost"
@@ -1048,18 +1124,51 @@ export function Composer({
           >
             <Plus className={cn("h-4 w-4", showTools && "rotate-45")} />
           </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            type="button"
+            data-testid="composer-code"
+            aria-label={t("codeBlock.compose")}
+            title={t("codeBlock.compose")}
+            aria-pressed={!!codeBlock}
+            disabled={queuing || admissionPending || pendingFiles.length > 0}
+            onClick={() => {
+              const next = codeBlock ? codeBlock.code : encodeCodeBlock(text);
+              setDraftText(next);
+              onDraftChange?.(next);
+              setMentionQuery(null);
+              if (ref.current) {
+                ref.current.style.height = "auto";
+                ref.current.focus();
+              }
+            }}
+            className={cn(
+              "h-9 w-9 shrink-0",
+              codeBlock && "bg-accent text-foreground",
+            )}
+          >
+            <Code2 className="h-4 w-4" />
+          </Button>
           <textarea
             ref={ref}
-            rows={1}
+            rows={codeBlock ? 6 : 1}
             data-testid="composer-input"
-            value={text}
+            value={codeBlock ? codeBlock.code : text}
             onChange={onInput}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            placeholder={placeholder}
+            placeholder={codeBlock ? t("codeBlock.placeholder") : placeholder}
+            spellCheck={codeBlock ? false : undefined}
+            autoCapitalize={codeBlock ? "off" : undefined}
+            autoCorrect={codeBlock ? "off" : undefined}
+            wrap={codeBlock ? "off" : "soft"}
             aria-label={placeholder}
-            title={t("redesign.keyboardHint")}
-            className="min-w-0 max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-[14px] leading-6 outline-none placeholder:text-muted-foreground"
+            title={codeBlock ? t("codeBlock.hint") : t("redesign.keyboardHint")}
+            className={cn(
+              "min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-[14px] leading-6 outline-none placeholder:text-muted-foreground",
+              codeBlock ? "max-h-64 font-mono whitespace-pre" : "max-h-40",
+            )}
           />
           <Popover open={protectionOpen} onOpenChange={setProtectionOpen}>
             <PopoverTrigger asChild>
@@ -1155,7 +1264,8 @@ export function Composer({
               sendingFiles ||
               queuing ||
               admissionPending ||
-              (!text.trim() && pendingFiles.length === 0)
+              (!(codeBlock ? codeBlock.code.trim() : text.trim()) &&
+                pendingFiles.length === 0)
             }
             onClick={() => {
               send();

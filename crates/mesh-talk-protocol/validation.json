@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "application-protocol-compatibility",
+      "paths": [
+        "crates/mesh-talk-protocol/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-protocol",
+          "filters": [
+            "mailbox::",
+            "account::",
+            "device::",
+            "discovery::"
+          ]
+        }
+      ],
+      "consumers": [],
+      "capability": {
+        "summary": "Preserve application-owned signed event, identity, discovery and mailbox formats while reusing generic Foundation mechanisms.",
+        "guide": "crates/mesh-talk-protocol/README.md",
+        "invariants": [
+          {
+            "name": "Historical Mesh Talk IDs, signature domains and wire discriminants remain byte-compatible; Foundation owns key material and signing primitives while application adapters retain historical identity/certificate bytes and creation metadata.",
+            "reference": "crates/mesh-talk-protocol/README.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run full protocol tests, core session regressions and desktop compile for compatibility changes."
+      ]
+    }
+  ]
+}

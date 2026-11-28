@@ -88,6 +88,57 @@ encrypted persistence. An unavailable peer or expired mailbox cannot imply
 complete history. Keep retry state, incomplete transfers and unresolved conflicts
 visible without claiming a global synchronization percentage.
 
+## Group authority and announcement convergence
+
+Track membership and announcements as separate decisions. An invitation is a
+pending membership state. The recipient must accept before current group
+information can be released to it. Membership applies through admitted signed
+controls, with account membership inherited by verified devices where the group
+supports account grants. A signed control committed locally and the effective
+state on another device are separate observations. An offline device learns
+about a removal when it applies the relevant authenticated controls. Legacy
+automatic acceptance rechecks the selected invitation and accepted sibling
+against the current signed group projection at the membership commit boundary.
+An ordinary invitation still requires the recipient's consent.
+
+A linked-device archive authenticates the requester as a sibling and qualifies
+the serving device against signed membership and the group sharing policy.
+Retaining a sibling's plaintext copy creates no membership, group key or
+delivery receipt. Public group event admission and current metadata access
+use their respective group authorities. Keep archived readable history distinct
+from authorization to obtain new group content.
+
+Announcements are independently revisioned, owner-authorized group metadata.
+A selected announcement still waiting for its current key or local projection
+has pending availability. That state differs from a settled empty announcement
+or a committed clear tombstone. When an authorized source becomes reachable,
+recover the current revision through the existing bounded group metadata path.
+The ability to obtain current information does not grant access to pre-join
+history. Replaying earlier controls and metadata must not restore a superseded
+grant or make a pending reinvitation effective.
+
+For changes at this boundary, verify the linked-device reconnect fixture
+against the original source event ID, then separately exercise group removal,
+replay and reinvitation. The signed-event fixture checks projection and
+authorization. The real TCP current-metadata fixture checks transfer from an
+eligible holder after the owner exits.
+
+For a repeatable loopback sample, run the continuation test by itself:
+
+```sh
+MESH_REQ018_MEASURE_CATCH_UP=1 RUST_TEST_NOCAPTURE=1 make test-focused \
+  TEST_PACKAGE=mesh-talk-core \
+  TEST_FILTER=account_history_worker_drains_continuation_without_waiting_retry_interval
+```
+
+The fixture queues forty messages before starting the receiver. It reports
+elapsed time through readable history, encrypted application-frame bytes sent
+across both endpoints, and the longest gap between completed pages and the
+next request. The counters are process-wide, so an isolated invocation is
+required for attribution. The sample excludes fixture seeding, link-layer
+overhead and physical-network variability. It does not establish a production
+throughput or storage budget.
+
 ## Future account authority V2
 
 Every currently linked device shares account authority. Removing a roster entry

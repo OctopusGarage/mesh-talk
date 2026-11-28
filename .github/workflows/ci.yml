@@ -51,6 +51,8 @@ jobs:
       manifestSha256: ${{ steps.archive.outputs.manifestSha256 }}
       archiveSha256: ${{ steps.archive.outputs.archiveSha256 }}
       rustVersion: ${{ steps.archive.outputs.rustVersion }}
+      toolsArtifactId: ${{ steps.validation_tools.outputs.artifact-id }}
+      toolsManifestSha: ${{ steps.stage_validation_tools.outputs.manifest_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,6 +174,25 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
+      - name: Measure Linux headless idle resources
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 -B -m unittest discover -s scripts/evals -p test_resource_benchmark.py
+          python3 -B scripts/evals/resource_benchmark.py target/debug/mesh-talk-node "$RUNNER_TEMP/resource-benchmark.json"
+
+      - name: Preserve Linux resource benchmark
+        if: ${{ always() && steps.scope.outputs.full == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-idle-resources-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/resource-benchmark.json
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: Workspace doctests (Linux)
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo test --workspace --doc --locked
@@ -180,6 +201,27 @@ jobs:
         id: archive
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: bash scripts/ci/linux-workspace.sh produce "$RUNNER_TEMP/linux-workspace-archive" --github-output
+      - name: Stage pinned Linux validation tools
+        id: stage_validation_tools
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/linux-validation-tools"
+          cp "$(command -v cargo-nextest)" "$(command -v cargo-llvm-cov)" "$RUNNER_TEMP/linux-validation-tools/"
+          cd "$RUNNER_TEMP/linux-validation-tools"
+          printf '%s\n' "$GITHUB_SHA $GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT" > identity
+          sha256sum identity cargo-nextest cargo-llvm-cov > SHA256SUMS
+          digest=$(sha256sum SHA256SUMS)
+          printf 'manifest_sha=%s\n' "${digest%% *}" >> "$GITHUB_OUTPUT"
+      - name: Preserve pinned Linux validation tools
+        id: validation_tools
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-validation-tools-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-validation-tools/
+          retention-days: 1
+          if-no-files-found: error
       - name: Preserve Linux binary archive
         if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/upload-artifact@v7
@@ -230,6 +272,8 @@ jobs:
       kind: default
       shard: ${{ matrix.shard }}
       rust_version: ${{ needs.checks.outputs.rustVersion }}
+      tools_artifact_id: ${{ needs.checks.outputs.toolsArtifactId }}
+      tools_manifest_sha: ${{ needs.checks.outputs.toolsManifestSha }}
       manifest_sha: ${{ needs.checks.outputs.manifestSha256 }}
       archive_sha: ${{ needs.checks.outputs.archiveSha256 }}
       full: ${{ needs.scope.outputs.full }}
@@ -245,6 +289,8 @@ jobs:
       kind: ignored
       shard: 0
       rust_version: ${{ needs.checks.outputs.rustVersion }}
+      tools_artifact_id: ${{ needs.checks.outputs.toolsArtifactId }}
+      tools_manifest_sha: ${{ needs.checks.outputs.toolsManifestSha }}
       manifest_sha: ${{ needs.checks.outputs.manifestSha256 }}
       archive_sha: ${{ needs.checks.outputs.archiveSha256 }}
       full: ${{ needs.scope.outputs.full }}

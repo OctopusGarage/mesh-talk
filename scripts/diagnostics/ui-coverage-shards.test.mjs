@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -22,7 +22,7 @@ async function fixture(t) {
     // Identical filenames across runners must not overwrite one another.
     await writeFile(path.join(dir, "e2e-parts/case.json"), JSON.stringify({ "http://localhost/src/app.tsx": [shard] }));
   }
-  const run = () => spawnSync(process.execPath, [fileURLToPath(collector), input, output, sha, "4"], { encoding: "utf8" });
+  const run = () => spawnSync(process.execPath, [fileURLToPath(collector), input, output, sha, "4"], { encoding: "utf8", env: { ...process.env, GITHUB_RUN_ATTEMPT: "2" } });
   return { root, input, output, run };
 }
 
@@ -131,4 +131,43 @@ test("unit coverage artifact cannot be sealed without complete identity or measu
   assert.notEqual(f.run("seal", { GITHUB_RUN_ATTEMPT: "" }).status, 0);
   await writeFile(f.source, "");
   assert.notEqual(f.run("seal").status, 0);
+});
+
+
+test("unit coverage consumer rerun restores its earlier successful producer attempt", async t => {
+  const f = await unitFixture(t);
+  assert.equal(f.run("seal").status, 0);
+  const saved = `${f.artifact}-saved`;
+  await rename(f.artifact, saved);
+  await mkdir(f.artifact);
+  await rename(saved, path.join(f.artifact, `ui-unit-coverage-${sha}-1234-2`));
+  const result = f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "3" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(f.output, "utf8"), f.lcov);
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "1" }).status, 0);
+});
+
+test("browser coverage consumer rerun selects the latest completed attempt of each shard", async t => {
+  const f = await fixture(t);
+  const newer = path.join(f.input, "ui-coverage-1-3");
+  await mkdir(path.join(newer, "e2e-parts"), { recursive: true });
+  await writeFile(path.join(newer, "shard.json"), JSON.stringify({ sourceSha: sha, shard: 1, total: 4 }));
+  await writeFile(path.join(newer, "e2e-parts/case.json"), JSON.stringify({ "http://localhost/src/app.tsx": [10] }));
+  const result = spawnSync(process.execPath, [fileURLToPath(collector), f.input, f.output, sha, "4"], { encoding: "utf8", env: { ...process.env, GITHUB_RUN_ATTEMPT: "3" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(await readFile(path.join(f.output, "shard-1-0.json"), "utf8")), { "http://localhost/src/app.tsx": [10] });
+});
+
+
+test("unit coverage consumer rerun accepts the single-artifact flat download layout", async t => {
+  const f = await unitFixture(t);
+  assert.equal(f.run("seal").status, 0);
+  const result = f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "3" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(f.output, "utf8"), f.lcov);
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "1" }).status, 0);
+  assert.notEqual(f.run("restore-latest", { GITHUB_SHA: "b".repeat(40) }).status, 0);
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ID: "5678" }).status, 0);
+  await writeFile(path.join(f.artifact, "lcov.info"), "SF:src/changed.ts\nDA:1,1\n");
+  assert.notEqual(f.run("restore-latest", { GITHUB_RUN_ATTEMPT: "3" }).status, 0);
 });

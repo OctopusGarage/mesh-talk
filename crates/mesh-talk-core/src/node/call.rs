@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::discovery::roster::UserId;
+use crate::eventlog::{ConversationId, LogError};
 use crate::node::session::SessionError;
 use crate::node::wire::{frame, unframe};
 use crate::transport::SecureChannel;
@@ -23,9 +24,15 @@ use tokio::net::TcpStream;
 
 const CALL_MAGIC: &[u8] = b"MTCS1";
 
+#[derive(Deserialize)]
+struct CallScope<'a> {
+    kind: &'a str,
+    protocol: Option<&'a str>,
+    group: Option<&'a str>,
+}
+
 /// The wire form: an opaque application payload (the app's JSON — call id, kind, SDP). The
-/// node neither parses nor persists it; it is a dumb, authenticated pipe for the frontend's
-/// WebRTC negotiation. Uses the shared magic-frame helper ([`crate::node::wire`]).
+/// node checks group scope when applying personal admission and never persists the payload. Uses the shared magic-frame helper ([`crate::node::wire`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallSignal {
     pub payload: Vec<u8>,
@@ -50,6 +57,57 @@ pub struct ReceivedCallSignal {
 }
 
 impl Node {
+    /// Resolve an authenticated device to an accepted account in one exact group.
+    /// Unpublished or stale checkpoints never grant meeting access.
+    pub fn group_voice_member(
+        &self,
+        group: ConversationId,
+        device_id: &str,
+    ) -> Result<Option<String>, NodeError> {
+        use super::account_group::AccountGroupRole;
+
+        let own = self.own_group_proof();
+        let proof = if device_id == self.user_id() {
+            own.clone()
+        } else {
+            let public = self
+                .roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .get(device_id)
+                .map(|peer| peer.public.clone());
+            let Some(public) = public else {
+                return Ok(None);
+            };
+            let Some(proof) = self
+                .historical_author(&public.ed25519_pub)
+                .filter(|proof| proof.public() == public && !proof.post_office)
+            else {
+                return Ok(None);
+            };
+            proof
+        };
+        let Some(account) = proof.account_id().filter(|_| proof.verify()) else {
+            return Ok(None);
+        };
+        let log = self.log.lock().expect("log lock not poisoned");
+        let projection = match self.account_group_projection_with_log(&log, group) {
+            Ok(projection) => projection,
+            Err(LogError::StaleCursor) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let accepted = |proof: &crate::discovery::Announce| {
+            Self::public_account_group_source(group, &projection, &proof.public(), proof)
+                .is_some_and(|source| {
+                    matches!(
+                        source.role,
+                        AccountGroupRole::Owner | AccountGroupRole::Member
+                    )
+                })
+        };
+        Ok((accepted(&own) && accepted(&proof)).then_some(account))
+    }
+
     /// Send an opaque call-signaling `payload` to a specific device `target_user_id`, right
     /// now, over a fresh authenticated Noise channel. Ephemeral: nothing is appended to the
     /// event log, and there is NO post-office fallback — a live call requires both devices
@@ -77,6 +135,13 @@ impl Node {
         let peer = self
             .routing_peer(target_user_id)
             .ok_or_else(|| NodeError::UnknownPeer(target_user_id.to_string()))?;
+        if self.personal_contacts_only()
+            && serde_json::from_slice::<CallScope<'_>>(payload)
+                .is_ok_and(|scope| scope.protocol.is_none() && scope.kind == "offer")
+        {
+            self.initiate_device_locally_if(&peer.public, &mut authorize)
+                .await?;
+        }
         if !self.known_account_allowed(&peer.public) {
             return Err(NodeError::Session(SessionError::Transport(
                 crate::transport::TransportError::AdmissionDenied,
@@ -107,6 +172,27 @@ impl Node {
             .map_err(SessionError::Transport)
             .map_err(NodeError::Session)?;
         Ok(())
+    }
+
+    pub(super) fn call_privacy_allowed(
+        &self,
+        channel: &SecureChannel<TcpStream>,
+        signal: &CallSignal,
+    ) -> bool {
+        if self.personal_peer_allowed(channel.peer_identity(), channel.peer_announcement()) {
+            return true;
+        }
+        let Ok(scope) = serde_json::from_slice::<CallScope<'_>>(&signal.payload) else {
+            return false;
+        };
+        let mut id = [0; 32];
+        scope.protocol == Some("group-voice-1")
+            && scope
+                .group
+                .is_some_and(|group| hex::decode_to_slice(group, &mut id).is_ok())
+            && self
+                .group_voice_member(ConversationId::new(id), &channel.peer_identity().user_id())
+                .is_ok_and(|member| member.is_some())
     }
 
     /// Surface an inbound, already-decoded call-signal to the app, binding its sender to the

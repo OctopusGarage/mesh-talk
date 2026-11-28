@@ -2,6 +2,20 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-account-security",
+      "paths": [
+        "crates/mesh-talk-core/src/identity/account_security.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "identity::account_security::"
+          ]
+        }
+      ]
+    },
+    {
       "id": "core-account-group-operations",
       "paths": [
         "crates/mesh-talk-core/src/node/account_group/",
@@ -91,6 +105,7 @@
             "node::delivery_store::tests::group_control_rejects_valid_payload_bound_to_another_kind_or_digest",
             "node::delivery_store::tests::group_control_requires_exact_original_request_wrappers",
             "node::account_sync::fanout::tests::",
+            "node::channels::fanout_tests::replay_progress_keeps_",
             "node::delivery_store::group_message::tests::",
             "node::delivery_store::group_owner_control::tests::",
             "node::delivery_store::tests::preexisting_group_request_bincode_bytes_remain_compatible",
@@ -546,16 +561,46 @@
       ]
     },
     {
+      "id": "core-personal-privacy",
+      "paths": [
+        "crates/mesh-talk-core/src/node/privacy.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
+        "crates/mesh-talk-core/src/node/call.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::privacy::tests::", "personal_admission_rejects_direct_and_relay_ingress_by_author_account"]
+        }
+      ],
+      "capability": {
+        "summary": "Apply durable local account restrictions to inbound personal communication.",
+        "guide": "docs/privacy-controls.md#personal-communication-controls",
+        "invariants": [
+          {
+            "name": "A block overrides approval for each verified device of the account, including events forwarded by custody.",
+            "reference": "docs/privacy-controls.md#personal-communication-controls"
+          }
+        ]
+      }
+    },
+    {
       "id": "core-private-route-probe-capacity",
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/route_timing.rs",
         "crates/mesh-talk-core/src/node/session_pool_tests.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/transport/channel.rs",
+        "crates/mesh-talk-core/src/transport/diagnostics.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
@@ -584,6 +629,7 @@
             "failed_private_probe_is_paced_but_replaced_route_is_immediately_eligible",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
+            "transport::diagnostics::tests::",
             "completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message",
             "successful_sync_rounds_reuse_one_authenticated_tcp_connection",
             "accountless_signed_discovery_reuses_five_completed_generic_rounds",
@@ -608,8 +654,16 @@
             "late_exact_receipt_releases_peer_lane_before_a_stalled_relay_finishes",
             "private_control_receipt_obeys_current_permission_and_queued_account_binding",
             "receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_early_receipt",
+            "node::route_timing::tests::",
+            "targeted_relay_rank_balances_origin_distance_and_responsiveness",
             "recipient_introduction_respects_preference_and_prioritizes_shared_fallback",
             "responsive_relay_order_preserves_preference_and_avoids_failed_paths",
+            "bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures",
+            "exact_chunk_lookup_requires_outgoing_authority",
+            "federated_body_claims_are_exact_and_released_on_cancellation",
+            "relay_completes_attachment_after_direct_prefix",
+            "authenticated_talk_channel_carries_sdk_chunk_requests",
+            "recipient_pulls_file_chunks_directly_when_push_missed",
             "duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync",
             "concurrent_live_endpoint_dials_keep_independent_authenticated_channels",
             "sync_pool_does_not_reuse_for_one_shot_or_wrong_identity_and_drops_cancelled_channels",
@@ -659,7 +713,8 @@
             "node::privacy_runtime::tests::joined_group_member_can_sync_group_but_not_dm_or_call",
             "node::privacy_runtime::tests::joined_group_protocol_snapshot_is_stable_before_single_shot_sync",
             "node::privacy_runtime::tests::failed_presence_cache_write_is_not_a_successful_empty_snapshot",
-            "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture"
+            "node::privacy_runtime::tests::cached_peer_snapshot_excludes_arrivals_after_its_capture",
+            "node::privacy_runtime::tests::relay_discovery_cache_does_not_block_async_executor"
           ]
         }
       ],
@@ -788,6 +843,10 @@
         "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "Exact read-receipt writes and imports wake document consumers without advancing broad chat presentation. Duplicate local receipts produce no notification.",
+            "reference": "docs/event-driven-design.md"
+          },
           {
             "name": "Local channel erasure uses retained signed identity, shared references or legacy channel state independently of display publication, preserves ordinary and unknown conversation boundaries, propagates suppression failure and retains durable suppression without changing ciphertext.",
             "reference": "docs/ARCHITECTURE.md"
@@ -929,6 +988,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/group_membership_query_tests.rs",
+        "crates/mesh-talk-core/src/node/call.rs",
         "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
@@ -1029,7 +1089,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live.",
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route. Ordinary unchanged wakes respect retained retry deadlines even for incomplete cycles; scheduling observation never acknowledges success, while fresh semantics, failed observations, explicit drivers and timer-disabled recovery remain live. Completed account groups without inherited devices preserve a matching input across sparse repair without reopening group bodies; real deadlines and errors still recheck.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1193,7 +1253,7 @@
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {
-            "name": "Recent search and exact context decode only selected canonical rows while preserving deduplication, pending acceptance, recovery, expiry and recall; retained metadata scans do not imply constant-cost or complete search",
+            "name": "Recent search and exact context hydrate selected canonical ranks while preserving deduplication, pending acceptance, recovery, expiry and recall. Capped search retains the same stable prefix as uncapped search while bounding accumulated hits.",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {
@@ -1351,6 +1411,7 @@
       "id": "core-discovery",
       "paths": ["crates/mesh-talk-core/src/discovery/"],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["discovery::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1371,6 +1432,10 @@
         "summary": "Authenticate bounded signed discovery proofs while preserving current presence, account and transport authority.",
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
+          {
+            "name": "Linux, macOS and Windows link and address notifications invalidate the authoritative interface snapshot. Subscription failure retains the two-second polling fallback, Linux and macOS receive overflow reconciles immediately, and the 30-second repair preserves multicast membership and missed-signal recovery. Windows callbacks coalesce into one pending wake and retire with the discovery task. Known-endpoint keepalives park without a destination and wake on roster observation; active leases retain their cadence.",
+            "reference": "docs/routed-network-discovery.md#network-changes-and-recovery"
+          },
           {
             "name": "Exact complete successful announcement proofs, including both signatures, may reuse intrinsic verification in a process-local 128-entry, 256-KiB metadata owner. Invalid results are not retained; changed fields reverify. Oversized inputs, contention, poison and eviction preserve original verification semantics without waiting or crypto under a guard. Current presence, account binding, revocation, visibility, discovery challenges and Noise authorization remain fresh; wire, SDK and storage formats are unchanged. Relayed name-only updates publish the existing roster observation while same-name route renewals remain quiet; descriptive-name invalidation grants no presence or account authority.",
             "reference": "docs/ai-coding-reliability.md#r08-durable-state-and-failure-semantics"
@@ -1395,8 +1460,11 @@
     },
     {
       "id": "core-eventlog",
-      "paths": ["crates/mesh-talk-core/src/eventlog/"],
+      "paths": [
+        "crates/mesh-talk-core/src/eventlog/"
+      ],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["legacy_event::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1430,7 +1498,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries",
+            "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries. SDK reader and frame qualification enforce the same scope, authority, revision, pinned-view and frontier rules for memory and SQL readers; failed reads never partially advance the application checkpoint or overlap counts",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1494,7 +1562,9 @@
     },
     {
       "id": "core-file",
-      "paths": ["crates/mesh-talk-core/src/file/"],
+      "paths": [
+        "crates/mesh-talk-core/src/file/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -1514,6 +1584,7 @@
         "crates/mesh-talk-core/src/node/account_sync.rs"
       ],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["account::", "device::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1569,6 +1640,7 @@
         "crates/mesh-talk-core/tests/indexed_relay_cli.rs"
       ],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["mailbox::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
@@ -1663,7 +1735,9 @@
     },
     {
       "id": "core-ratchet",
-      "paths": ["crates/mesh-talk-core/src/ratchet/"],
+      "paths": [
+        "crates/mesh-talk-core/src/ratchet/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -1702,6 +1776,10 @@
         "invariants": [
           {
             "name": "Snapshot extensions preserve prior positional tags and archive authentication; schema 6 installs exact local deletion facts before history reconstruction",
+            "reference": "docs/backup-recovery.md#snapshot-compatibility"
+          },
+          {
+            "name": "Portable restore commits bounded sent-body pages and their original event identities together. A conflicting body or alias rolls back the page before staged profile publication.",
             "reference": "docs/backup-recovery.md#snapshot-compatibility"
           },
           {
@@ -1779,7 +1857,9 @@
           }
         ]
       },
-      "paths": ["crates/mesh-talk-core/src/storage/"],
+      "paths": [
+        "crates/mesh-talk-core/src/storage/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -1805,7 +1885,9 @@
     },
     {
       "id": "core-transport",
-      "paths": ["crates/mesh-talk-core/src/transport/"],
+      "paths": [
+        "crates/mesh-talk-core/src/transport/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -1813,6 +1895,7 @@
         }
       ],
       "escalation": [
+        "Run cargo test -p mesh-connect --test connect for the extracted frame session.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
       "consumers": [
@@ -2140,6 +2223,8 @@
             "node::delivery_runtime_tests::expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery",
             "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines",
             "node::expiry_policy::tests::",
+            "node::node::tests::expiry_worker_parks_without_deadlines_and_rechecks_after_commit",
+            "node::delivery_store::tests::expiry_watch_only_wakes_after_expiring_delivery_is_committed",
             "node::node::tests::unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines",
             "node::favorites::capture_tests::unchanged_expiry_maintenance_does_not_rescan_favorite_media"
           ]
@@ -2162,7 +2247,7 @@
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           },
           {
-            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
+            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Quiet expiry work parks on profile, expiring delivery and favorites journal commits with sparse repair; active clocks and failed erasure keep one-second checks. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           }
         ]
@@ -2200,6 +2285,7 @@
         "crates/mesh-talk-core/src/bin/",
         "crates/mesh-talk-core/tests/",
         "crates/mesh-talk-core/examples/",
+        "scripts/e2e-federation-recovery.py",
         "specifications/deployment_guide.md"
       ],
       "rust": [
@@ -2212,6 +2298,7 @@
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
         "Persistent-history and shared CLI peer-readiness harness changes require cargo test -p mesh-talk-core --test persistent_history_observer and the actual native consumer node scripts/evals/backend-runner.mjs, plus affected extra integration targets. Require an exact peer/full-user-ID roster record; live reception, startup/history/probe output and unrelated UID occurrences cannot certify prefix-resolution readiness. Preserve original polling and observation watchdogs. Keep ordinary controls in their separate target and the ignored-only persistent_history target complete with one real scenario and zero filtered tests. Raw Cargo success alone does not establish report acceptance. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
         "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
+        "Run the unchanged four-host recovery topology when its fixture changes. A and B must retain their authenticated local ingress relays via routed discovery while the inter-site bridge alone is stopped. Preserve the no-direct Windows-to-remote-relay probe and stage deadlines.",
         "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
       "capability": {
@@ -2293,7 +2380,7 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "A single runtime-owned essential worker uses the shared adaptive control budget, retries transient failures promptly and resets cooldown on verified route or identity changes",
+            "name": "A single runtime-owned essential worker uses the shared adaptive control budget, retries transient failures promptly and resets cooldown on verified route or identity changes. Without eligible peers it waits for roster or committed linked-device membership changes without a periodic wake. Certifying an already-observed sibling starts work without a new announcement. Failed or duplicate inserts publish no membership change.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
@@ -2667,13 +2754,13 @@
         "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
+        { "package": "mesh-talk-protocol", "filters": ["legacy_event::"] },
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::group_metadata::tests::",
             "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
             "node::session::tests::",
-            "eventlog::event::tests::",
             "eventlog::persist::legacy::tests::",
             "node::join_history::tests::",
             "settled_local_channel_owner_does_not_reenter_business_between_repair_deadlines",
@@ -2760,6 +2847,7 @@
             "node::delivery_store::tests::",
             "node::delivery_retry::tests::",
             "node::delivery_runtime::diagnostic_tests::",
+            "node::delivery_runtime_tests::empty_delivery_worker_parks_until_new_durable_demand",
             "node::delivery_runtime_tests::relay_held_",
             "private_file_restart_advances_twenty_four_pending_scopes_fairly",
             "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind",
@@ -3111,6 +3199,7 @@
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
             "retained_channel_without_checkpoint_cannot_publish_saved_plaintext",
             "indexed_runtime_recent_history_",
+            "first_account_history_open_batches_candidate_writes",
             "node::filebook::indexed::tests::",
             "node::attachment_consent::",
             "direct_file_approval_shares_signed_revision_with_relay_delivery",
@@ -3127,6 +3216,8 @@
             "unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate",
             "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
             "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
+            "node::node::tests::auto_enrolls_certified_sibling_with_owner_signed_invitation",
+            "node::account_sync::selection_tests::account_sync_pending_channel_requester_receives_no_archive_or_file_bytes",
             "node::node::tests::ready_history_",
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "eventlog::repository::order::tests::history_selectors_reject_retired_unready_and_incomplete_derived_ranges"
@@ -3138,6 +3229,10 @@
         "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
+          {
+            "name": "Full history generation commits candidate metadata in bounded header pages while preserving lifecycle checks and refusing unfinished rank ranges. Reopening unchanged history reuses the ready ranks without another write commit.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
           {
             "name": "Ever-history selection reads at most 128 indexed account or verified legacy device-pair keys without plaintext and retains sent, received and file-card existence after clear, prune and restart. Legacy attribution shares search human-binding and live-relay precedence, uses at most 129 deduplicated signing keys from current identity, up to 64 authenticated recovery origins and up to 64 certified own devices, and supplies optional contact-specific offline candidates only with positive indexed history. Generic known-account enumeration keeps its prior cost and failure behavior; binding alone is never history and storage errors remain errors rather than false absence.",
             "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
@@ -3345,7 +3440,13 @@
             "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies",
             "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress",
             "participant_durable_have_",
+            "participant_small_dm_preparation_",
+            "reduced_range_page_allowance_",
+            "participant_empty_range_",
             "node::session::paged_tests::ordinary_request_",
+            "node::session::paged_tests::cached_partial_view_",
+            "node::session::range_sync::account_delivery_tests::",
+            "node::session::range_sync::custody_readiness_tests::",
             "node::session::paged_tests::ordinary_requester_",
             "node::delivery_store::control_index_tests::",
             "ordinary_requester_reuses_selection_without_idle_commits",
@@ -3360,6 +3461,7 @@
             "empty_selection_cleanup_preserves_cached_read_plans",
             "node::session::mailbox_watch::",
             "node::serving::mailbox_watch::",
+            "node::serving::post_office_drain_schedule_tests::",
             "modern_relay_receive_",
             "source_notifications_exclude_reads_rollbacks_and_derived_work",
             "parked_mailbox_watches_preserve_normal_capacity_and_release_on_drop",
@@ -3373,6 +3475,10 @@
         "summary": "Reconcile opaque mailboxes through finite indexed deltas and bounded on-demand participant exports, preserving current authority and durable retry evidence.",
         "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
         "invariants": [
+          {
+            "name": "A broad source invalidation keeps the next eligible deadline of an empty relay receive turn. An owned drain or watch retains a coalesced follow-up, and group mailbox selection checks exact historical identity before canonical membership.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
           {
             "name": "Ordinary Guarded outbound pull-only zero-wire reconciliation can reuse a proved unique remote subset under exact current local source and authority, empty pending work, a fresh existing wire fingerprint probe and a nonrenewing five-minute maximum deadline. It preserves the remote intersection count and the shared 128-entry metadata quota, never grants equality, custody or delivery, and leaves unsupported, changed, failed and duplex requests on ordinary reconciliation.",
             "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"

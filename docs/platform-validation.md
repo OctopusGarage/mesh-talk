@@ -105,7 +105,7 @@ can cover both commands:
 
 ```sh
 python3 scripts/build-retention.py run -- bash -c \
-  'node scripts/validation/native-build.mjs && node scripts/diagnostics/hidden-contacts.mjs'
+  'node scripts/validation/native-build.mjs && NATIVE_CONTACT_ALLOW_FOREGROUND=1 node scripts/diagnostics/hidden-contacts.mjs'
 ```
 
 On Windows, place both commands in the same managed PowerShell runner, retaining
@@ -126,6 +126,27 @@ Native input requires an unlocked, active desktop session. A locked local macOS
 session can still render WKWebView snapshots while refusing application/key-window
 activation. That is an environment failure, not a successful interaction test;
 retain focus diagnostics and rerun on an unlocked desktop or hosted runner.
+
+### Run routine checks without activating the desktop
+
+Use the owner-scoped IPC and core tests for search, storage and session
+behavior. For real WebView IPC sampling, pass `--hidden` after the three
+fixture arguments to `native-contact-eval`. This selects the app's existing
+hidden-start path. On macOS this mode leaves out the evaluation keyboard
+plugin, whose Focus event activates the app. Use direct WebDriver DOM or IPC
+calls for assertions that can run in a hidden WebView.
+
+For native accessibility smoke checks on an already running test window,
+`agent-desktop` can snapshot an exact app and window ID and use semantic
+element actions. Record the foreground app before and after the smoke check.
+If the hidden window is unavailable to Accessibility or the action needs an
+active window, run the scenario in a dedicated desktop session. See
+[agent-desktop macOS capabilities](https://agent-browser.dev/desktop/platforms/macos#what-works-headless).
+
+The full contact suite exercises native focus, keyboard handling and painted
+screenshots. Local macOS runs require `NATIVE_CONTACT_ALLOW_FOREGROUND=1` before
+the runner starts any fixture process. Hosted CI continues to run the full
+suite on its own desktop.
 
 ## Portable browser execution
 

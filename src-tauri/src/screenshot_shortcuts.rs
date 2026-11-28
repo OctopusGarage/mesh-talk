@@ -10,7 +10,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::{Emitter, Manager, Runtime};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+#[cfg(not(target_os = "linux"))]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -150,6 +152,7 @@ fn replace_keys<R: Registry>(
     Ok(())
 }
 struct NativeRegistry<R: Runtime>(tauri::AppHandle<R>);
+#[cfg(not(target_os = "linux"))]
 impl<R: Runtime> Registry for NativeRegistry<R> {
     type Key = Shortcut;
     fn register(&mut self, key: Shortcut) -> Result<(), String> {
@@ -169,9 +172,69 @@ impl<R: Runtime> Registry for NativeRegistry<R> {
     }
 }
 
+// The X11 implementation polls while its manager lives, even with zero
+// bindings. The existing registration operation serializes manager ownership.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct LinuxRegistry {
+    manager: Option<global_hotkey::GlobalHotKeyManager>,
+    registered: BTreeSet<u32>,
+}
+
+#[cfg(target_os = "linux")]
+impl<R: Runtime> Registry for NativeRegistry<R> {
+    type Key = Shortcut;
+
+    fn register(&mut self, key: Shortcut) -> Result<(), String> {
+        let state = self.0.state::<ScreenshotShortcutState>();
+        let mut linux = state.linux.lock().unwrap();
+        if let Some(manager) = &linux.manager {
+            manager.register(key).map_err(|error| error.to_string())?;
+        } else {
+            let app = self.0.clone();
+            global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(
+                move |event: global_hotkey::GlobalHotKeyEvent| {
+                    handle_shortcut_event(&app, event.id, event.state);
+                },
+            ));
+            let manager =
+                global_hotkey::GlobalHotKeyManager::new().map_err(|error| error.to_string())?;
+            manager.register(key).map_err(|error| error.to_string())?;
+            linux.manager = Some(manager);
+        }
+        linux.registered.insert(key.id());
+        Ok(())
+    }
+
+    fn unregister(&mut self, key: Shortcut) -> Result<(), String> {
+        let state = self.0.state::<ScreenshotShortcutState>();
+        let mut linux = state.linux.lock().unwrap();
+        if let Some(manager) = &linux.manager {
+            manager.unregister(key).map_err(|error| error.to_string())?;
+        }
+        linux.registered.remove(&key.id());
+        if linux.registered.is_empty() {
+            linux.manager = None;
+        }
+        Ok(())
+    }
+
+    fn is_registered(&self, key: Shortcut) -> bool {
+        self.0
+            .state::<ScreenshotShortcutState>()
+            .linux
+            .lock()
+            .unwrap()
+            .registered
+            .contains(&key.id())
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ScreenshotShortcutState {
     pub(crate) operation: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(target_os = "linux")]
+    linux: Arc<Mutex<LinuxRegistry>>,
     inner: Arc<Mutex<Registration>>,
 }
 #[derive(Clone, Default)]
@@ -589,10 +652,19 @@ struct CaptureRequest {
     hide_window: bool,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 pub(crate) fn handle_shortcut<R: Runtime>(
     app: &tauri::AppHandle<R>,
     shortcut: &Shortcut,
     event: tauri_plugin_global_shortcut::ShortcutEvent,
+) {
+    handle_shortcut_event(app, shortcut.id(), event.state);
+}
+
+fn handle_shortcut_event<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    shortcut_id: u32,
+    event_state: ShortcutState,
 ) {
     let state = app.state::<ScreenshotShortcutState>();
     let request = {
@@ -600,17 +672,21 @@ pub(crate) fn handle_shortcut<R: Runtime>(
         if inner.degraded {
             return;
         }
-        if event.state == ShortcutState::Released {
-            inner.pressed.remove(&shortcut.id());
+        if event_state == ShortcutState::Released {
+            inner.pressed.remove(&shortcut_id);
             return;
         }
-        if !inner.pressed.insert(shortcut.id()) {
+        if !inner.pressed.insert(shortcut_id) {
             return;
         }
         let Some(lease) = inner.lease.clone() else {
             return;
         };
-        let Some((_, hide)) = inner.bindings.iter().find(|(key, _)| key == shortcut) else {
+        let Some((_, hide)) = inner
+            .bindings
+            .iter()
+            .find(|(key, _)| key.id() == shortcut_id)
+        else {
             return;
         };
         (lease, *hide)
@@ -654,13 +730,16 @@ where
     G: Registry<Key = Shortcut> + Send + 'static,
 {
     let state = app.state::<ScreenshotShortcutState>();
-    let snapshot = state.inner.lock().unwrap().clone();
-    if snapshot
-        .lease
-        .as_ref()
-        .is_some_and(|lease| !current(&app.state::<AppState>(), lease))
+    let (lease, registration_id) = {
+        let registration = state.inner.lock().unwrap();
+        let Some(lease) = registration.lease.clone() else {
+            return;
+        };
+        (lease, registration.registration_id)
+    };
+    if !current(&app.state::<AppState>(), &lease)
         && let Err(error) = state
-            .suspend_with_registry(make_registry, snapshot.registration_id)
+            .suspend_with_registry(make_registry, registration_id)
             .await
     {
         log::warn!("Could not suspend screenshot shortcuts: {error}");
@@ -670,6 +749,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a dedicated X11 display"]
+    fn x11_global_manager_lives_only_while_bindings_are_registered() {
+        let state = ScreenshotShortcutState::default();
+        let host = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let mut registry = NativeRegistry(host.handle().clone());
+        let first: Shortcut = "Control+Alt+Shift+KeyU".parse().unwrap();
+        let second: Shortcut = "Control+Alt+Shift+KeyY".parse().unwrap();
+
+        assert!(state.linux.lock().unwrap().manager.is_none());
+        registry.register(first).unwrap();
+        registry.register(second).unwrap();
+        assert!(registry.is_registered(first));
+        assert!(registry.is_registered(second));
+        registry.unregister(first).unwrap();
+        assert!(state.linux.lock().unwrap().manager.is_some());
+        registry.unregister(second).unwrap();
+        assert!(state.linux.lock().unwrap().manager.is_none());
+        assert!(!registry.is_registered(second));
+
+        registry.register(first).unwrap();
+        registry.unregister(first).unwrap();
+        assert!(state.linux.lock().unwrap().manager.is_none());
+    }
 
     #[test]
     fn screenshot_shortcuts_default_to_local_and_survive_old_settings() {

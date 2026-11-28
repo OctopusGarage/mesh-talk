@@ -104,6 +104,46 @@ pub(super) fn node_with_identity(
 pub(super) use super::super::test_support::settle_group_metadata;
 
 #[test]
+fn read_receipt_publication_only_invalidates_receipt_observers() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = node(dir.path(), &account);
+    let mut desktop = node.subscribe_desktop_ui_changes();
+    let mut documents = node.subscribe_account_documents();
+    let before = *desktop.borrow_and_update();
+    let conversation = DocumentConversation::Account("a".repeat(32));
+    let message = "b".repeat(64);
+
+    let meta = node
+        .mark_account_message_seen_if(conversation.clone(), message.clone(), |commit| commit())
+        .unwrap();
+    let after = *desktop.borrow_and_update();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.documents, before.documents);
+    assert_eq!(after.read_receipts, before.read_receipts + 1);
+    assert!(documents.has_changed().unwrap());
+    documents.borrow_and_update();
+    let page = node
+        .account_documents(AccountDocumentDomain::ReadReceipt, None, 1)
+        .unwrap();
+    assert_eq!(page.items, vec![meta.clone()]);
+
+    let duplicate = node
+        .mark_account_message_seen_if(conversation, message, |commit| commit())
+        .unwrap();
+    assert_eq!(duplicate, meta);
+    assert!(!desktop.has_changed().unwrap());
+    assert!(!documents.has_changed().unwrap());
+
+    node.documents_imported_domain(Some(AccountDocumentDomain::ReadReceipt));
+    let imported = *desktop.borrow_and_update();
+    assert_eq!(imported.state, after.state);
+    assert_eq!(imported.documents, after.documents);
+    assert_eq!(imported.read_receipts, after.read_receipts + 1);
+    assert!(documents.has_changed().unwrap());
+}
+
+#[test]
 fn completed_channel_metadata_wakes_deferred_inventory_without_an_idle_loop() {
     use crate::{
         channel::{ChannelMeta, new_channel_id},
@@ -309,7 +349,15 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
             "the held Noise bytes belong to this exact recovery parent's dial, not another publisher");
         assert!(!*held.release.borrow());
         assert!(source.channel_custody_observations(group, event).is_empty(), "no report was warmed before the unrelated hold");
+        // Keep the sibling genuinely empty while the production recovery owner
+        // runs: a range exchange could otherwise install the original and
+        // legitimately supersede the negative observation before inspection.
+        // Only exact Have is served; all other authenticated request frames stay
+        // held on their own connection, without retaining a store mutex.
+        let negative_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served_negative_queries = Arc::clone(&negative_queries);
         let serving = Arc::clone(&sibling);
+        let expected_source = source.identity.public();
         tasks.spawn(async move {
             let mut children = tokio::task::JoinSet::new();
             loop {
@@ -318,13 +366,35 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
                         let (stream, _) = accepted.unwrap();
                         let Some(permit) = serving.runtime_work.admit() else { return; };
                         let peer = Arc::clone(&serving);
+                        let queries = Arc::clone(&served_negative_queries);
+                        let expected_source = expected_source.clone();
                         children.spawn(permit.track(Box::pin(async move {
-                            if let Ok(channel) = peer.privacy_accept(stream).await {
-                                peer.serve_connection(channel).await;
+                            let Ok(mut channel) = peer.privacy_accept(stream).await else { return; };
+                            assert_eq!(channel.peer_identity(), &expected_source);
+                            let store = peer.sync_store(channel.peer_identity());
+                            let Some(_reception) = peer.request_reception_scope(&store, &channel) else { return; };
+                            while let Ok(bytes) = channel.recv().await {
+                                if super::super::session::durable_have_query_for_test(&bytes) != Some((group, event)) {
+                                    std::future::pending::<()>().await;
+                                    return;
+                                }
+                                assert!(peer.log.lock().unwrap().get(&event).unwrap().is_none(),
+                                    "the negative responder must not acquire the original through concurrent recovery");
+                                queries.fetch_add(1, Ordering::Release);
+                                match super::super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
+                                    Ok(super::super::session::Served::Handled(id)) => {
+                                        assert_eq!(id, group);
+                                    }
+                                    _ => return,
+                                }
                             }
                         })));
                     }
-                    _ = children.join_next(), if !children.is_empty() => {}
+                    result = children.join_next(), if !children.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            assert!(error.is_cancelled(), "negative Have responder failed: {error}");
+                        }
+                    }
                 }
             }
         });
@@ -342,11 +412,20 @@ async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
         }).await.expect("authenticated custody report must publish while unrelated recovery remains held");
         assert!(started.elapsed() < Duration::from_secs(8));
         assert!(!*held.release.borrow(), "the report cannot borrow completion of the unrelated exchange");
+        assert!(negative_queries.load(Ordering::Acquire) > 0,
+            "the report must follow the sibling's real exact-event Have response");
+        assert!(sibling.log.lock().unwrap().get(&event).unwrap().is_none(),
+            "original transfer remains held throughout the negative report measurement");
         let observations = source.channel_custody_observations(group, event);
+        let expected_key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(group.as_bytes()),
+            event: event.to_hex(),
+            holder: sibling.user_id(),
+        };
         assert!(observations.iter().any(|meta| {
             meta.valid(&account.public().ed25519_pub) && meta.tombstone
-                && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if holder == &sibling.user_id())
-        }), "the current sibling authenticated a negative exact durable-have claim");
+                && meta.writer_device == source.user_id() && meta.key == expected_key
+        }), "the source signed the current sibling's negative exact-event durable-have observation");
     }).catch_unwind().await;
     held.release.send_replace(true);
     source.runtime_work.close();
@@ -976,6 +1055,26 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             .await
             .unwrap();
         let event = source.channel_history(channel, 10).unwrap()[0].id;
+        let peer = source.routing_peer(&holder.user_id()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                source
+                    .distribute_channel_confirming(
+                        channel,
+                        std::slice::from_ref(&peer.public),
+                        Some(event),
+                    )
+                    .await;
+                if holder.log.lock().unwrap().get(&event).unwrap().is_some()
+                    && source.channel_custody_count(channel, event).unwrap() == Some(1)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("normal exact fanout setup must finish before injecting blob loss");
         assert!(
             holder.log.lock().unwrap().get(&event).unwrap().is_some(),
             "the real holder must retain the exact original encrypted event"
@@ -1851,22 +1950,25 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     for (label, current, peer) in [
         ("source", &a, sibling.identity.public()),
         ("sibling", &sibling, a.identity.public()),
+        ("holder", &bob, a.identity.public()),
     ] {
         let trace = custody_trace.clone();
         let omitted = custody_trace_omitted.clone();
         let important = custody_important.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(std::sync::Arc::new(move |observed, phase| {
-                if observed != peer
-                    || !(phase.starts_with("page_")
-                        || phase.starts_with("negotiation_")
-                        || phase.starts_with("session_")
-                        || phase.starts_with("dial_authentication_")
-                        || phase.starts_with("dial_outbound_")
-                        || phase.starts_with("wake_")
-                        || phase.starts_with("fixture_")
-                        || phase.starts_with("history_")
-                        || phase.starts_with("favorite_"))
+                if !phase.starts_with("custody_probe_")
+                    && !phase.starts_with("history_wire_failed")
+                    && (observed != peer
+                        || !(phase.starts_with("page_")
+                            || phase.starts_with("negotiation_")
+                            || phase.starts_with("session_")
+                            || phase.starts_with("dial_authentication_")
+                            || phase.starts_with("dial_outbound_")
+                            || phase.starts_with("wake_")
+                            || phase.starts_with("fixture_")
+                            || phase.starts_with("history_")
+                            || phase.starts_with("favorite_")))
                 {
                     return;
                 }
@@ -1877,6 +1979,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                     phase,
                 );
                 if entry.3.starts_with("fixture_")
+                    || entry.3.starts_with("custody_probe_")
                     || (entry.3.contains("outcome=") && !entry.3.contains("outcome=ok"))
                 {
                     let mut important = important.lock().unwrap();
@@ -2087,8 +2190,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             custody_trace.lock().unwrap()
         );
     }
-    for current in [&a, &sibling] {
-        *current.account_client_test_hook.lock().unwrap() = None;
+    if std::env::var_os("MESH_TALK_CUSTODY_TRACE").is_none() {
+        for current in [&a, &sibling, &bob] {
+            *current.account_client_test_hook.lock().unwrap() = None;
+        }
     }
     assert!(
         actual.is_ok(),
@@ -2129,7 +2234,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             }
         })
         .await
-        .expect("the returning external holder must confirm this exact message");
+        .unwrap_or_else(|error| {
+            let holder_has_event = bob.log.lock().unwrap().get(&event).unwrap().is_some();
+            let holder_store = bob.sync_store(&a.identity.public());
+            let exact_visible = crate::eventlog::sync::SyncStore::durable_have(
+                &*holder_store.lock().unwrap(), &channel, &event,
+            );
+            panic!("the returning external holder must confirm this exact message: {error}; retained={holder_has_event}; exact_visible={exact_visible:?}; source_count={:?}", a.channel_custody_count(channel, event));
+        });
         assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
         assert_eq!(
             bob.channel_custody_count(channel, event).unwrap(),
@@ -2328,7 +2440,12 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         );
         wait_custody_source_count(&a, channel, event, 1, repair_deadline)
             .await
-            .expect("the recovery owner must confirm the repaired external copy");
+            .unwrap_or_else(|error| {
+                let retained = lost.log.lock().unwrap().get(&event).unwrap().is_some();
+                let holder_store = lost.sync_store(&a.identity.public());
+                let visible = crate::eventlog::sync::SyncStore::durable_have(&*holder_store.lock().unwrap(), &channel, &event);
+                panic!("the recovery owner must confirm the repaired external copy: {error}; retained={retained}; exact_visible={visible:?}");
+            });
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),
@@ -4745,6 +4862,23 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         })
         .await
         .expect("both real legacy holders must confirm before their certificate bindings change");
+        // These inbound-only hosts have no participant recovery owner. Finish
+        // their retained membership projections before testing fresh exact
+        // custody views, independently of the baseline range continuations.
+        for holder in [&bob, &bob2] {
+            crate::node::test_support::settle_group_metadata(holder, channel);
+            let peer = source.routing_peer(&holder.user_id()).unwrap();
+            let mut connection = source
+                .privacy_dial(peer.addr, &peer.public)
+                .await
+                .expect("authenticate a fresh baseline exact-custody connection");
+            assert!(
+                crate::node::session::request_durable_have(&mut connection, channel, event)
+                    .await
+                    .expect("complete a fresh baseline exact-custody query"),
+                "each settled legacy holder must confirm custody on a fresh connection"
+            );
+        }
         assert_eq!(
             source.channel_custody_count(channel, event).unwrap(),
             Some(2),

@@ -1,6 +1,6 @@
 # Enable experimental voice and video calls
 
-Enable calling in settings, then use a reachable direct conversation.
+Experimental calling is off by default. Enable it in settings to use direct voice and video calls or group voice meetings.
 
 ## Enable calling
 
@@ -8,6 +8,24 @@ Enable calling in settings, then use a reachable direct conversation.
 2. Enable the experimental calling option.
 3. Open a direct conversation and use its call control.
 4. Grant microphone or camera access when the operating system asks.
+
+## Group voice meetings
+
+Open an existing group with reachable devices on the same LAN. Start a voice
+meeting from the group, or choose to join an available meeting. Each participant
+needs experimental calling enabled and must choose to join before the app
+requests microphone access. Invitations go to up to 64 known reachable group
+devices when the meeting starts and expire after two minutes.
+
+Group voice currently supports up to four participating devices. Each device
+sends its microphone audio directly to the other participants and plays their
+audio locally. Group messages and post offices carry no meeting audio.
+Existing group membership is required. A working group chat can coexist with
+a blocked direct audio connection, for example on a Wi-Fi network that isolates
+clients.
+
+Leaving releases your microphone. If the initiator leaves, existing
+connections can continue and new joins pause.
 
 ## Check microphone and camera
 
@@ -52,6 +70,12 @@ video still has an unmuted player. Local video previews stay muted to avoid echo
 Replacing a stream or closing its view pauses playback and detaches the old stream.
 Hangup and media connection failure stop local capture and close the peer
 connection. A failed media connection shows the call failure notice.
+
+## Share a window
+
+During an established one-to-one video call, choose **Share window** when the app offers it. The control requires a client with window capture and an outgoing video track negotiated for the call. Select one application window in the system picker. The shared window replaces your outgoing camera picture. Your microphone setting still applies, and sharing does not capture system audio.
+
+**Sharing a window** appears while your window is being sent. Choose **Stop sharing**, close the shared window, or use the system stop control to end the share. The call restores the camera to its previous state. Hanging up, losing the call, or locking the app ends the capture. If the picker returns a display or browser tab, choose a window instead.
 
 ## Connection limits
 

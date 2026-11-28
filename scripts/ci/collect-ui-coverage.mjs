@@ -10,12 +10,21 @@ const total = Number(shardCount);
 assert.ok(Number.isSafeInteger(total) && total > 0, "Expected a positive shard count");
 const shards = new Set();
 const parts = [];
+const selected = new Map();
 for (const directory of await readdir(input)) {
   const root = path.join(input, directory);
   const metadata = JSON.parse(await readFile(path.join(root, "shard.json"), "utf8"));
   assert.equal(metadata.sourceSha, sourceSha, "Coverage belongs to another revision");
   assert.equal(metadata.total, total, "Coverage shard count changed");
-  const shard = metadata.shard;
+  const name = /^ui-coverage-([1-9]\d*)-([1-9]\d*)$/.exec(directory);
+  assert.ok(name && Number(name[1]) === metadata.shard, "Invalid or duplicate coverage shard");
+  const attempt = BigInt(name[2]);
+  if (process.env.GITHUB_RUN_ATTEMPT) assert.ok(attempt <= BigInt(process.env.GITHUB_RUN_ATTEMPT), "Future coverage producer attempt");
+  const previous = selected.get(metadata.shard);
+  if (!previous || attempt > previous.attempt) selected.set(metadata.shard, { directory, attempt });
+}
+for (const [shard, { directory }] of selected) {
+  const root = path.join(input, directory);
   assert.ok(Number.isSafeInteger(shard) && shard >= 1 && shard <= total && !shards.has(shard), "Invalid or duplicate coverage shard");
   shards.add(shard);
   const files = (await readdir(path.join(root, "e2e-parts"))).filter(file => file.endsWith(".json")).sort();

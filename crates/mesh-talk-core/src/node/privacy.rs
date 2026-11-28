@@ -64,6 +64,16 @@ pub struct PrivacySnapshot {
     pub version: u32,
     pub invisible: bool,
     pub allowed_accounts: Vec<AllowedAccount>,
+    pub contacts_only: bool,
+    pub blocked_accounts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct LegacyPrivacySnapshot {
+    version: u32,
+    invisible: bool,
+    allowed_accounts: Vec<AllowedAccount>,
 }
 /// One encrypted policy file; mutations commit to disk before changing memory.
 ///
@@ -89,9 +99,11 @@ impl PrivacyPolicy {
                 salt,
                 key: EncryptionKey::from_password(password, &salt).map_err(crypto_error)?,
                 snapshot: PrivacySnapshot {
-                    version: 1,
+                    version: 2,
                     invisible: false,
                     allowed_accounts: Vec::new(),
+                    contacts_only: false,
+                    blocked_accounts: Vec::new(),
                 },
             };
             p.save(&p.snapshot)?;
@@ -117,8 +129,31 @@ impl PrivacyPolicy {
             .map_err(crypto_error)?;
         let key = EncryptionKey::from_password(password, &salt).map_err(crypto_error)?;
         let plaintext = decrypt_data(&bytes[HEADER..], &nonce, &key).map_err(crypto_error)?;
-        let snapshot: PrivacySnapshot = codec().deserialize(&plaintext).map_err(crypto_error)?;
-        if snapshot.version != 1 || snapshot.allowed_accounts.len() > 1024 {
+        let snapshot: PrivacySnapshot = if plaintext.starts_with(&1_u32.to_le_bytes()) {
+            let legacy: LegacyPrivacySnapshot =
+                codec().deserialize(&plaintext).map_err(crypto_error)?;
+            if legacy.version != 1 {
+                return Err(invalid());
+            }
+            PrivacySnapshot {
+                version: 2,
+                invisible: legacy.invisible,
+                allowed_accounts: legacy.allowed_accounts,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
+            }
+        } else {
+            codec().deserialize(&plaintext).map_err(crypto_error)?
+        };
+        if snapshot.version != 2
+            || snapshot.allowed_accounts.len() > 1024
+            || snapshot.blocked_accounts.len() > 1024
+            || !snapshot.blocked_accounts.iter().all(|id| valid_id(id))
+            || !snapshot
+                .blocked_accounts
+                .windows(2)
+                .all(|ids| ids[0] < ids[1])
+        {
             return Err(invalid());
         }
         let mut previous: Option<&str> = None;
@@ -152,6 +187,55 @@ impl PrivacyPolicy {
                 .binary_search_by(|a| a.id.as_str().cmp(id))
                 .is_ok()
     }
+    pub(super) fn contacts_only(&self) -> bool {
+        self.snapshot.contacts_only
+    }
+
+    pub(super) fn has_personal_restrictions(&self) -> bool {
+        self.snapshot.contacts_only || !self.snapshot.blocked_accounts.is_empty()
+    }
+
+    pub(super) fn allows_personal(&self, account: Option<&str>) -> bool {
+        if let Some(id) = account
+            && self
+                .snapshot
+                .blocked_accounts
+                .binary_search_by(|entry| entry.as_str().cmp(id))
+                .is_ok()
+        {
+            return false;
+        }
+        !self.snapshot.contacts_only || account.is_some_and(|id| self.allows(id))
+    }
+
+    pub(super) fn set_contacts_only(&mut self, enabled: bool) -> io::Result<bool> {
+        if self.snapshot.contacts_only == enabled {
+            return Ok(false);
+        }
+        let mut next = self.snapshot.clone();
+        next.contacts_only = enabled;
+        self.commit(next).map(|()| true)
+    }
+
+    pub(super) fn set_blocked(&mut self, id: &str, blocked: bool) -> io::Result<bool> {
+        if !valid_id(id) {
+            return Err(invalid());
+        }
+        let mut next = self.snapshot.clone();
+        match next
+            .blocked_accounts
+            .binary_search_by(|entry| entry.as_str().cmp(id))
+        {
+            Ok(index) if !blocked => {
+                next.blocked_accounts.remove(index);
+            }
+            Err(_) if blocked && next.blocked_accounts.len() >= 1024 => return Err(invalid()),
+            Err(index) if blocked => next.blocked_accounts.insert(index, id.into()),
+            _ => return Ok(false),
+        }
+        self.commit(next).map(|()| true)
+    }
+
     /// Commit visibility before replacing memory; failed writes preserve prior state.
     pub fn set_invisible(&mut self, invisible: bool) -> io::Result<()> {
         let mut next = self.snapshot.clone();
@@ -244,6 +328,61 @@ impl PrivacyPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_policy_keeps_visibility_and_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("privacy");
+        let policy = PrivacyPolicy::open(&path, "pw").unwrap();
+        let id = "b".repeat(32);
+        let legacy = LegacyPrivacySnapshot {
+            version: 1,
+            invisible: true,
+            allowed_accounts: vec![AllowedAccount {
+                id: id.clone(),
+                name: "Bob".into(),
+                source: PermissionSource::Initiated,
+            }],
+        };
+        let plaintext = codec().serialize(&legacy).unwrap();
+        let (cipher, nonce) = encrypt_data(&plaintext, &policy.key).unwrap();
+        let mut file = MAGIC.to_vec();
+        file.extend(policy.salt);
+        file.extend(nonce);
+        file.extend(cipher);
+        fs::write(&path, file).unwrap();
+        let mut reopened = PrivacyPolicy::open(&path, "pw").unwrap();
+        assert!(reopened.snapshot().invisible);
+        assert!(reopened.allows(&id));
+        assert!(!reopened.has_personal_restrictions());
+        reopened.set_contacts_only(true).unwrap();
+        assert!(
+            PrivacyPolicy::open(&path, "pw")
+                .unwrap()
+                .allows_personal(Some(&id))
+        );
+    }
+
+    #[test]
+    fn personal_admission_survives_reopen_and_block_overrides_permission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("privacy");
+        let id = "a".repeat(32);
+        let mut policy = PrivacyPolicy::open(&path, "pw").unwrap();
+        assert!(policy.allows_personal(None));
+        policy.set_contacts_only(true).unwrap();
+        assert!(!policy.allows_personal(None));
+        assert!(!policy.allows_personal(Some(&id)));
+        policy
+            .grant(&id, "Alice", PermissionSource::Manual)
+            .unwrap();
+        assert!(policy.allows_personal(Some(&id)));
+        policy.set_blocked(&id, true).unwrap();
+        let mut reopened = PrivacyPolicy::open(&path, "pw").unwrap();
+        assert!(!reopened.allows_personal(Some(&id)));
+        reopened.set_blocked(&id, false).unwrap();
+        assert!(reopened.allows_personal(Some(&id)));
+    }
+
     #[test]
     fn grant_survives_reopen() {
         let root = tempfile::tempdir().unwrap();
@@ -386,47 +525,61 @@ mod tests {
         };
         for snapshot in [
             PrivacySnapshot {
-                version: 2,
+                version: 3,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![a.clone(), a.clone()],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![AllowedAccount {
                     id: "invalid".into(),
                     ..a.clone()
                 }],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![a.clone(); 1025],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![AllowedAccount {
                     name: "bad\n".into(),
                     ..a.clone()
                 }],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![AllowedAccount {
                     name: "界".repeat(257),
                     ..a.clone()
                 }],
             },
             PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
                 allowed_accounts: vec![
                     AllowedAccount {
                         id: "b".repeat(32),
@@ -444,13 +597,15 @@ mod tests {
         write_plain(&plain);
         assert!(PrivacyPolicy::open(&path, "pw").is_err());
         let mut plain = bincode::serialize(&PrivacySnapshot {
-            version: 1,
+            version: 2,
             invisible: false,
+            contacts_only: false,
+            blocked_accounts: Vec::new(),
             allowed_accounts: vec![a],
         })
         .unwrap();
-        let end = plain.len();
-        plain[end - 4..].copy_from_slice(&2_u32.to_le_bytes());
+        let source_end = plain.len() - 9;
+        plain[source_end - 4..source_end].copy_from_slice(&2_u32.to_le_bytes());
         write_plain(&plain);
         assert!(PrivacyPolicy::open(&path, "pw").is_err());
     }

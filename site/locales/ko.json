@@ -244,6 +244,7 @@
   "Choose a desktop download": "데스크톱 다운로드 선택",
   "{label} is unavailable in this release.": "이 릴리스에서는 {label}을(를) 사용할 수 없습니다.",
   "ZIP · {size} MB": "ZIP · {size} MB",
+  "{format} · {size} MB": "{format} · {size} MB",
   "Stable {version} · Choose your computer’s architecture. Downloads are hosted on GitHub.": "안정 버전 {version} · 컴퓨터의 아키텍처를 선택하세요. 다운로드는 GitHub에서 제공됩니다.",
   "Stable {version} · {platform} · {label} · {size} MB ZIP": "안정 버전 {version} · {platform} · {label} · {size} MB ZIP",
   "Open Mesh-Talk on your Mac": "Mac에서 Mesh-Talk 열기",

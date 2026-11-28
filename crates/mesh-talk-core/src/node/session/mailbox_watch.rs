@@ -1,6 +1,8 @@
 //! Optional MTOW1 bounded invalidation hints on a dedicated authenticated channel.
 use super::*;
 use crate::postoffice::{IndexedPostOffice, MailboxWatchToken};
+use bincode::Options;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 const MAGIC: &[u8; 5] = b"MTOW1";

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mesh-Talk core: a serverless, end-to-end-encrypted LAN messaging protocol — identity & device certificates, an encrypted event log with peer sync, Double Ratchet + sender-key forward secrecy, a Noise transport, LAN discovery, a store-and-forward post office, and the node runtime. UI-free; the basis for an SDK."
+description = "Mesh-Talk core: a serverless, end-to-end-encrypted LAN messaging protocol — identity & device certificates, an encrypted event log with peer sync, Double Ratchet + sender-key forward secrecy, a Noise transport, LAN discovery, a store-and-forward post office, and the node runtime. UI-free application runtime composed from Mesh Foundation mechanisms."
 
 [features]
 # TEST-ONLY: collapses the password KDFs (Argon2 + PBKDF2) to a trivial cost so downstream
@@ -28,6 +28,13 @@ name = "mesh-talk-node"
 path = "src/bin/mesh-talk-node.rs"
 
 [dependencies]
+mesh-identity = { version = "=0.1.0-alpha.2", package = "mesh-foundation-identity" }
+mesh-talk-protocol = { path = "../mesh-talk-protocol" }
+mesh-replication = { version = "=0.1.0-alpha.2", package = "mesh-foundation-replication" }
+mesh-connect = { version = "=0.1.0-alpha.2", package = "mesh-foundation-connect", default-features = false }
+mesh-storage = { version = "=0.1.0-alpha.2", package = "mesh-foundation-storage" }
+mesh-blob = { version = "=0.1.0-alpha.2", package = "mesh-foundation-blob", features = ["mesh-connect"] }
+mesh-e2ee = { version = "=0.1.0-alpha.2", package = "mesh-foundation-e2ee" }
 rusqlite = { version = "0.42.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "cache", "blob"] }
 serde_json = "1"
 tokio = { workspace = true }
@@ -39,7 +46,7 @@ hex = { workspace = true }
 bincode = { workspace = true }
 uuid = { workspace = true }
 aes-gcm = { workspace = true }
-pbkdf2 = { workspace = true }
+ring = "0.17.14"
 sha2 = { workspace = true }
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -64,9 +71,14 @@ libc = "0.2"
 
 # Probe the PID recorded by the CLI data-dir lock after a Windows service restart.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+mesh-talk-protocol = { path = "../mesh-talk-protocol", features = ["test-observability"] }
+mesh-storage = { version = "=0.1.0-alpha.2", package = "mesh-foundation-storage", features = ["test-observability"] }
+mesh-connect = { version = "=0.1.0-alpha.2", package = "mesh-foundation-connect", default-features = false, features = ["test-observability"] }
+mesh-replication = { version = "=0.1.0-alpha.2", package = "mesh-foundation-replication", features = ["test-observability"] }
+pbkdf2 = { workspace = true } # Independent reference for production-format fixtures.
 tokio = { workspace = true, features = ["test-util"] }
 rand_chacha = "0.10" # seeded CSPRNG for deterministic property tests (rand_core 0.10 traits)
 # Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that

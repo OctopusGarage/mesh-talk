@@ -12,7 +12,8 @@ export interface UnreadSource {
   conversation: Conversation | null;
 }
 
-/** The review and app badge cover the same counters, even without directory rows. */
+/** The review retains raw unread, including muted groups and missing directory rows.
+ * The app badge separately projects attention according to group notification policy. */
 export function unreadSources(
   state: {
     myAccountId?: string;

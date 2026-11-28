@@ -98,7 +98,7 @@ impl TranscriptRepository {
         ordinal: i64,
     ) -> Result<Option<StoredRow>, LogError> {
         self.profile.database().read(|c| {
-            let mut statement = c.prepare(&format!(
+            let mut statement = c.prepare_cached(&format!(
                 "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND ordinal=?2"
             ))?;
             let mut rows = statement.query(params![self.kind, ordinal])?;
@@ -130,6 +130,16 @@ impl TranscriptRepository {
             h.map(|h|self.load_on(c,h)).transpose()
         })
     }
+    pub(in crate::node) fn has_deadlines(&self) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transcript_rows WHERE kind=?1 AND deadline IS NOT NULL)",
+                [self.kind],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
     /// Before=None is the conservative recipient restart selection. The caller
     /// classifies sender identity without opening any non-expiring payload.
     pub(in crate::node) fn deadline_page(

@@ -43,7 +43,7 @@ test("one reusable shard implementation retains platform-sized runners and all e
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(reusable, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16\]'\n      shard_total: 16/);
   assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 3);
   assert.ok(!root().includes("name: Run UI E2E"));
@@ -96,7 +96,7 @@ test("desktop browser burst waits for Health and WebKit with bounded admission w
   assert.match(job("linux"), /needs: \[scope\]/);
 });
 
-test("HTML reports require all platform-specific current-attempt shards", () => {
+test("HTML reports require all platform-specific same-run shards", () => {
   const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = { desktop: "success", platforms };
   assert.equal(renderReports(complete).status, 0);
@@ -104,11 +104,11 @@ test("HTML reports require all platform-specific current-attempt shards", () => 
     const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
     assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
   }
-  assert.notEqual(renderReports({ ...complete, missing: ["macos-26-intel-8"] }).status, 0, "macOS eighth shard is mandatory");
+  assert.notEqual(renderReports({ ...complete, missing: ["macos-26-intel-16"] }).status, 0, "macOS sixteenth shard is mandatory");
   const discovery = renderReports({ ...complete, discoveryFailure: true });
   assert.notEqual(discovery.status, 0);
   assert.deepEqual(discovery.rendered, [], "failed layout discovery cannot silently render an incomplete report");
-  assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
+  assert.equal(renderReports({ ...complete, attempt: "2" }).status, 0, "earlier successful same-run producers remain available");
 });
 
 test("HTML presentation never substitutes for successful producer acceptance", () => {
@@ -195,7 +195,7 @@ function renderReports({ linux = "success", desktop = "skipped", windows = deskt
     mkdirSync(path.join(directory, "scripts/evals"), { recursive: true });
     for (const file of ["chromium-evidence.mjs", "browser-report.mjs", "png-evidence.mjs", "trace-evidence.mjs"]) copyFileSync(new URL(`../evals/${file}`, import.meta.url), path.join(directory, "scripts/evals", file));
     if (discoveryFailure) writeFileSync(path.join(directory, "scripts/evals/chromium-evidence.mjs"), "process.exit(37);\n");
-    for (const os of platforms) for (const shard of os === "macos-26-intel" ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4]) {
+    for (const os of platforms) for (const shard of os === "macos-26-intel" ? Array.from({ length: 16 }, (_, index) => index + 1) : [1, 2, 3, 4]) {
       if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
       const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
       mkdirSync(blob, { recursive: true });
@@ -238,7 +238,8 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
     for (const os of platforms) assert.notEqual(renderReports({ desktop, platforms, omit: `${os}-3` }).status, 0, `${os} missing shard`);
   }
   assert.notEqual(renderReports({ renderExit: "37" }).status, 0, "renderer failure remains a presentation failure");
-  assert.notEqual(renderReports({ attempt: "2" }).status, 0, "previous-attempt blobs cannot replace this attempt");
+  assert.equal(renderReports({ attempt: "2" }).status, 0, "same-run successful producers survive a partial rerun");
+  assert.notEqual(renderReports({ attempt: "4" }).status, 0, "future-attempt blobs are rejected");
   for (const result of ["", "unknown", "in_progress"]) {
     assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
     assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);

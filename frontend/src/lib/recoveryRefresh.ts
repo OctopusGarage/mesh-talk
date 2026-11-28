@@ -1,3 +1,8 @@
+import {
+  isNativeWindowMinimized,
+  subscribeNativeWindowMinimized,
+} from "./nativeWindowVisibility";
+
 /** Semantic invalidations own prompt updates. This is activation and lost-event
  * recovery only; delivery, expiry and calls must retain their own deadlines. */
 export const RECOVERY_REFRESH_MS = 5 * 60_000;
@@ -9,23 +14,25 @@ export function startRecoveryRefresh(
     intervalMs = () => RECOVERY_REFRESH_MS,
   }: {
     background?: boolean;
-    intervalMs?: () => number;
+    intervalMs?: (() => number) | null;
   } = {},
 ): () => void {
   let active = true;
   let queued = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const visible = () =>
-    typeof document === "undefined" || document.visibilityState !== "hidden";
+    (typeof document === "undefined" ||
+      document.visibilityState !== "hidden") &&
+    (background || !isNativeWindowMinimized());
   const arm = () => {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    if (!active || (!background && !visible())) return;
+    if (!active || intervalMs === null || (!background && !visible())) return;
     timer = setTimeout(
       () => {
         timer = undefined;
         arm();
-        if (active) refresh();
+        if (active && (background || visible())) refresh();
       },
       Math.max(1, intervalMs()),
     );
@@ -43,9 +50,13 @@ export function startRecoveryRefresh(
   const page = typeof document === "undefined" ? undefined : document;
   host?.addEventListener?.("focus", activate);
   page?.addEventListener?.("visibilitychange", activate);
+  const stopNative = background
+    ? undefined
+    : subscribeNativeWindowMinimized(activate);
   arm();
   return () => {
     active = false;
+    stopNative?.();
     if (timer !== undefined) clearTimeout(timer);
     host?.removeEventListener?.("focus", activate);
     page?.removeEventListener?.("visibilitychange", activate);

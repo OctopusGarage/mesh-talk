@@ -159,7 +159,18 @@ impl ChannelState {
     ) -> Result<Zeroizing<Vec<u8>>, ChannelError> {
         let mut chain = SenderChain::decode_checkpoint(checkpoint)
             .map_err(|_| ChannelError::Malformed("invalid local receiver checkpoint".into()))?;
-        chain.refresh_distribution(distribution);
+        if distribution
+            .n
+            .saturating_sub(chain.current_distribution().n)
+            > mesh_e2ee::sender_key::MAX_SKIP
+        {
+            let candidate = chain.prepare_rebase(distribution).map_err(|_| {
+                ChannelError::Malformed("invalid receiver recovery checkpoint".into())
+            })?;
+            candidate.install(&mut chain).map_err(|_| {
+                ChannelError::Malformed("stale receiver recovery checkpoint".into())
+            })?;
+        }
         chain
             .encode_checkpoint()
             .map_err(|_| ChannelError::Malformed("invalid local receiver checkpoint".into()))

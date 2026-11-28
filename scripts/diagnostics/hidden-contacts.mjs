@@ -13,6 +13,14 @@ import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLo
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, nativeControlKeyName, sendNativeLinuxKey, settledSignedInSession, settledPrivacyMode, settledPrivacyConfirmationDismissal, startPrivacyDialogTrace } from "./native-core-scenarios.mjs";
 
+// This suite asserts actual native focus, keyboard handling and paint.
+if (process.platform === "darwin" && process.env.GITHUB_ACTIONS !== "true"
+    && process.env.NATIVE_CONTACT_ALLOW_FOREGROUND !== "1") {
+  throw new Error(
+    "Native contact acceptance activates windows. Run it on a dedicated desktop, or set NATIVE_CONTACT_ALLOW_FOREGROUND=1 for an intentional foreground run.",
+  );
+}
+
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const initialStatus = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
@@ -232,6 +240,15 @@ async function passed(name, observations, captures = []) {
   console.log(`PASS ${name}`);
 }
 async function startApp() {
+  const startupLog = join(fixture, "app", "logs", "mesh-talk.log");
+  const startupMetricCount = async () => {
+    const log = await readFile(startupLog, "utf8").catch(error => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    return (log.match(/\bdesktop_host_ready_ms=\d+\b/gu) ?? []).length;
+  };
+  const previousStartupMetrics = await startupMetricCount();
   const port = await freePort();
   endpoint = `http://127.0.0.1:${port}`;
   app = launch(appBinary, [join(fixture, "app"), String(port), String(discoveryPort)]);
@@ -239,6 +256,10 @@ async function startApp() {
     if (!owned.has(app)) throw new Error(`app exited: ${app.output}`);
     return (await request("GET", "/status"))?.ready;
   });
+  await until("one host initialization metric while desktop is running", async () => {
+    assert.ok(owned.has(app), "desktop exited before emitting readiness metric");
+    return await startupMetricCount() === previousStartupMetrics + 1;
+  }, 5000);
   const value = await request("POST", "/session", { capabilities: { alwaysMatch: {} } });
   session = value.sessionId;
   assert.ok(session, "native session created");

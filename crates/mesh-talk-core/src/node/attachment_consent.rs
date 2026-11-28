@@ -434,11 +434,28 @@ impl Node {
             NodeError::InvalidInput("attachment does not require approval or is unknown".into())
         })?;
         // One durable decision covers all identical signed offer events for this file.
-        self.attachment_consent
-            .lock()
-            .expect("consent lock not poisoned")
-            .decide(event, accept)
-            .map_err(NodeError::Log)?;
+        {
+            use crate::transport::diagnostics;
+            let mut consent = self
+                .attachment_consent
+                .lock()
+                .expect("consent lock not poisoned");
+            let changed = diagnostics::observing_messages()
+                && consent
+                    .file_decision(file)
+                    .is_ok_and(|decision| decision != Some(accept));
+            consent.decide(event, accept).map_err(NodeError::Log)?;
+            if changed {
+                diagnostics::record_message(|metrics| {
+                    let counter = if accept {
+                        &mut metrics.attachments_accepted
+                    } else {
+                        &mut metrics.attachments_declined
+                    };
+                    *counter = counter.saturating_add(1);
+                });
+            }
+        }
         self.files
             .lock()
             .expect("files lock")

@@ -2,6 +2,22 @@
 # Own manual installer collection, checksum roles and signed application ZIPs.
 set -euo pipefail
 
+collect_arm64_dmg() (
+  local source="$1" output="$2" staging original_size compressed_size
+  staging=$(mktemp -d release/.arm64-dmg.XXXXXX)
+  trap 'rm -rf -- "$staging"' EXIT
+  hdiutil convert "$source" -format ULMO -o "$staging/installer.dmg"
+  hdiutil verify "$staging/installer.dmg"
+  original_size=$(wc -c < "$source")
+  compressed_size=$(wc -c < "$staging/installer.dmg")
+  if (( compressed_size < original_size )); then
+    mv "$staging/installer.dmg" "$output"
+    echo "ARM64 DMG compressed from $original_size to $compressed_size bytes."
+  else
+    cp "$source" "$output"
+  fi
+)
+
 collect() {
   : "${ARTIFACT_TAG:?release tag required}"
   mkdir -p release
@@ -18,7 +34,12 @@ collect() {
     [ -e "$file" ] || continue
     BASENAME=$(basename "$file")
     NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
-    cp "$file" "release/$NEWNAME"
+    case "${TARGET:-}:$file" in
+      aarch64-apple-darwin:target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+        collect_arm64_dmg "$file" "release/$NEWNAME"
+        ;;
+      *) cp "$file" "release/$NEWNAME" ;;
+    esac
   done
 
   ls -lh release || true
@@ -132,11 +153,37 @@ package() {
   BUNDLE_FILE="${ZIP_NAME}.bundle"
   node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"
 
+  # The signed ZIP's SHA256SUMS binds the same installer bytes. Publish
+  # individually so Linux users need only download their chosen format.
+  if [[ "$OS_NAME" == linux ]]; then
+    for file in "${installer_files[@]}"; do
+      if [[ "$file" == *.AppImage && -f "release/mesh-talk-update_${TAG}_${OS_NAME}_${ARCH}.AppImage" ]]; then
+        rm -f "release_zips/mesh-talk-installer_${TAG}_${OS_NAME}_${ARCH}.AppImage"
+        continue
+      fi
+      cp "$file" "release_zips/mesh-talk-installer_${TAG}_${OS_NAME}_${ARCH}.${file##*.}"
+    done
+  fi
+
   echo "✅ Bundle signature generated: $BUNDLE_FILE"
   ls -lh release_zips
 }
 
+report_sizes() {
+  shopt -s nullglob
+  local file bytes
+  local archives=(release_zips/*.zip)
+  test "${#archives[@]}" -gt 0
+  printf '### Release download sizes\n\n| Artifact | Bytes |\n| --- | ---: |\n'
+  for file in "${archives[@]}" release_zips/mesh-talk-installer_* release_zips/mesh-talk-update_*; do
+    case "$file" in *.sig|*.json) continue ;; esac
+    [[ -f "$file" && ! -L "$file" ]] || continue
+    bytes=$(wc -c < "$file")
+    printf '| %s | %d |\n' "${file##*/}" "$bytes"
+  done
+}
+
 case "${1:-}" in
-  collect|checksums|package) "$1" ;;
-  *) echo "Usage: package-app.sh collect|checksums|package" >&2; exit 1 ;;
+  collect|checksums|package|report_sizes) "$1" ;;
+  *) echo "Usage: package-app.sh collect|checksums|package|report_sizes" >&2; exit 1 ;;
 esac

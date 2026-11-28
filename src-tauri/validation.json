@@ -2,6 +2,31 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-group-voice-admission",
+      "paths": ["src-tauri/src/chat_commands/messaging.rs"],
+      "capability": {
+        "summary": "Gate live group-voice device admission on the experimental calls preference and the current signed group membership.",
+        "guide": "docs/help/topics/calls.md",
+        "invariants": [
+          {
+            "name": "The installed session must be unlocked and the device must resolve to an accepted account in the exact group.",
+            "reference": "CONTEXT.md"
+          }
+        ]
+      },
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "settings::tests::old_settings_json_without_the_new_fields_loads_with_defaults"
+          ]
+        }
+      ],
+      "escalation": [
+        "Verify installed-app playback and group admission across native clients on a physical LAN."
+      ]
+    },
+    {
       "id": "desktop-group-metadata",
       "paths": [
         "src-tauri/src/chat_commands/channel_metadata.rs",
@@ -72,7 +97,8 @@
       },
       "consumers": ["frontend-screenshot-shortcuts"],
       "escalation": [
-        "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration."
+        "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration.",
+        "On real X11, verify that the global shortcut worker is absent at default startup, appears with the first registered key, and retires on disable, lock and logout. Re-enable and actuate the binding after retirement; record idle process wakeups with no global bindings."
       ]
     },
     {
@@ -368,6 +394,7 @@
           "package": "mesh-talk",
           "filters": [
             "owner_commands::tests::registered_channel_custody_rejects_lock_and_queued_session_replacement",
+            "owner_commands::tests::held_channel_custody_read_does_not_block_session_and_rejects_authority_change",
             "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals"
           ]
         }
@@ -377,7 +404,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections. The existing bounded batch query combines member and post-office observations under one runtime admission, preserves input order, and omits unknown rows without turning them into zero.",
+            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections. The bounded channel custody batch uses participant-owned blocking work outside session and runtime-slot guards. Publication checks current installation and app-lock revision, preserves input order, and omits unknown rows without turning them into zero.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]
@@ -767,6 +794,41 @@
       ]
     },
     {
+      "id": "desktop-lan-review",
+      "paths": [
+        "src-tauri/src/lan_review.rs",
+        "src-tauri/src/lan_review_http.rs",
+        "docs/lan-review.md"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "lan_review_http::",
+            "lan_review::tests::",
+            "registered_lan_review_preview_"
+          ]
+        },
+        {
+          "package": "mesh-talk-core",
+          "filters": ["lan_review_text", "discovery::scope::"]
+        }
+      ],
+      "capability": {
+        "summary": "Temporarily disclose one eligible exact text message over an on-demand LAN HTTP listener.",
+        "guide": "docs/lan-review.md",
+        "invariants": [
+          {
+            "name": "Current source and desktop authority gate disclosure, and invalidation retires the bounded listener.",
+            "reference": "docs/lan-review.md#authority-and-lifetime"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify native desktop issuance and revocation with a second-device browser on the selected physical LAN, followed by shutdown and idle cleanup."
+      ]
+    },
+    {
       "id": "desktop-chat",
       "escalation": [
         "IPC command names/payloads and emitted events require typed frontend API/store consumer checks and affected browser behavior; file/native side effects require focused native evidence."
@@ -799,6 +861,8 @@
       "paths": [
         "src-tauri/src/contact_policy.rs",
         "src-tauri/src/contact_policy/",
+        "src-tauri/src/chat_commands/models.rs",
+        "src-tauri/src/chat_commands/presence.rs",
         "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/owner_commands/group_operations.rs",
         "crates/mesh-talk-core/src/node/account_documents/personal.rs"
@@ -832,7 +896,7 @@
             "reference": "docs/network-design-reference.md#personal-conversation-removal"
           },
           {
-            "name": "Never-used discovered accounts expire after one nonrenewing local 24-hour clock; durable sent, received or file history remains protected after clear. Expiry changes presentation only and fails open on clock or history-query errors.",
+            "name": "Never-chatted contacts remain online, get a new 24-hour grace period after each observed disconnect, and have their pending metadata physically removed after offline expiry. No expiry tombstones or separate cleanup worker remain. Durable sent, received or file history and sticky legacy history survive clear; explicit hide/delete wins. Restart/migration preserve conservative offline age; failed history or storage reads never authorize deletion.",
             "reference": "docs/privacy-controls.md#discovered-contacts-without-chat-history"
           }
         ]
@@ -979,6 +1043,10 @@
           {
             "name": "Viewing account binding changes mutates nothing and acceptance requires current unlocked installation authority plus the exact reviewed device and old/new account pair",
             "reference": "docs/peer-trust.md#recover-a-device-that-changed-accounts"
+          },
+          {
+            "name": "Personal communication settings require the current unlocked installation through the durable policy commit.",
+            "reference": "docs/privacy-controls.md#personal-communication-controls"
           }
         ]
       }
@@ -1024,6 +1092,7 @@
       "id": "desktop-diagnostics",
       "paths": [
         "src-tauri/src/diagnostics.rs",
+        "src-tauri/src/diagnostics/process_resources.rs",
         "src-tauri/src/perf.rs",
         "src-tauri/src/logger/",
         "src-tauri/src/lib.rs"
@@ -1031,13 +1100,32 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["diagnostics::", "updates::", "perf::", "logger::"]
+          "filters": [
+            "diagnostics::",
+            "updates::",
+            "perf::",
+            "logger::",
+            "app_lock::tests::diagnostics_authority_rejects_completed_work_after_lock_or_session_replacement",
+            "app_lock::tests::diagnostics_worker_cannot_publish_after_lock_or_logout"
+          ]
         }
       ],
       "capability": {
-        "summary": "Expose bounded opt-in diagnostic metadata while preserving normal logging and IPC authority.",
+        "summary": "Record desktop host readiness and expose bounded opt-in IPC metadata while preserving logging and IPC authority.",
         "guide": "docs/performance-requirements.md#evidence-and-maintenance",
         "invariants": [
+          {
+            "name": "Desktop host readiness logs one elapsed time at Tauri Ready. The initial interface acknowledgement records its own elapsed time from the same launch clock; the visibility fallback never fabricates an acknowledgement.",
+            "reference": "docs/performance-requirements.md#evidence-and-maintenance"
+          },
+          {
+            "name": "The desktop resource IPC reads one bounded snapshot of the host and identifiable descendant processes under a visible sampling lease without creating a collector, making network requests or touching account state.",
+            "reference": "docs/performance-requirements.md#desktop-resource-monitor"
+          },
+          {
+            "name": "Lock and logout retire the live sampler. A delayed resource snapshot or log-tail read can publish only under the originating desktop session and unchanged app-lock revision.",
+            "reference": "docs/privacy-controls.md#exposure-by-observer"
+          },
           {
             "name": "IPC work summaries are disabled by default, record only bounded registered command names after handled dispatch, exclude lock rejection and unhandled inputs, and emit outside nonblocking observation guards without a background timer. Counts do not establish completion, success or CPU attribution; arguments, results and private state never enter the observer.",
             "reference": "docs/performance-requirements.md#evidence-and-maintenance"
@@ -1316,6 +1404,7 @@
       "id": "desktop-account-login",
       "paths": [
         "src-tauri/src/shared_account_login.rs",
+        "src-tauri/src/account_security.rs",
         "src-tauri/src/shared_account_login/",
         "src-tauri/src/services/user.rs",
         "src-tauri/src/services/auth_service.rs",
@@ -1333,6 +1422,8 @@
           "package": "mesh-talk",
           "filters": [
             "shared_account_login::tests::",
+            "account_security::tests::",
+            "runtime_admission::integration_lease_tests::prepared_security_publication",
             "services::auth_service::tests::",
             "desktop_session::",
             "commands::tests::",
@@ -1391,6 +1482,7 @@
         "src-tauri/src/reception_host.rs",
         "src-tauri/src/reception_host/",
         "src-tauri/src/events.rs",
+        "src-tauri/src/events/",
         "src-tauri/src/runtime_bootstrap.rs"
       ],
       "rust": [
@@ -1399,6 +1491,7 @@
           "filters": [
             "reception_host::",
             "events::notification_policy_tests::",
+            "events::presentation::tests::",
             "runtime_bootstrap::tests::"
           ]
         }
@@ -1409,7 +1502,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Runtime, local user, account and device authority fence every page and ACK; current state/progress use the same coalesced wake.",
+            "name": "Runtime, local user, account and device authority fence every page and ACK; state and progress use the coalesced reception wake. Roster-only hints bypass reception and require the exact installed renderer runtime.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1417,7 +1510,11 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "name": "Native reception observation waits for the existing change signal when idle and coalesces pending changes within the one-second observation limit.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
+          },
+          {
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; committed receipt-only wakes do not create global state, roster-only hints avoid unrelated payload reloads and legacy consumers retain full repair.",
             "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
           {
@@ -1460,7 +1557,11 @@
     },
     {
       "id": "desktop-inline-media-preview",
-      "paths": ["src-tauri/src/chat_commands/files.rs", "src-tauri/src/lib.rs"],
+      "paths": [
+        "src-tauri/src/chat_commands/files.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/image_text.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
@@ -1471,7 +1572,8 @@
             "owner_commands::tests::registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads",
             "owner_commands::tests::registered_plaintext_and_trust_commands_reject_replaced_entry_authority",
             "chat_commands::files::tests::preview_deadline_bounds_runtime_writer_wait_without_starting_work",
-            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock"
+            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock",
+            "image_text::tests::"
           ]
         }
       ],
@@ -1528,6 +1630,68 @@
         "Require two packaged macOS builds with distinct code hashes: convenience-mode restart and update must restore without Keychain or device-owner prompts; protected-mode startup and cancellation must retain manual recovery. Mocks do not prove native prompt behavior."
       ],
       "consumers": ["frontend-sensitive-operations"]
+    },
+    {
+      "id": "desktop-group-mute",
+      "paths": [
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/chat_commands/state.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "events::notification_policy_tests",
+            "muted_groups_are_local_account_settings_with_legacy_defaults"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Apply local account group notification preferences at native presentation authority.",
+        "guide": "docs/module-boundaries.md#group-notification-attention",
+        "invariants": [
+          {
+            "name": "Muted ordinary alerts remain suppressed; existing mention eligibility respects global privacy and focus.",
+            "reference": "docs/help/topics/notifications.md#mute-a-group"
+          }
+        ]
+      },
+      "consumers": ["frontend-group-mute"],
+      "escalation": [
+        "Real macOS/Windows native notifications and lock/account replacement evidence remain required."
+      ]
+    },
+    {
+      "id": "desktop-totp-integrated-acceptance",
+      "paths": [
+        "src-tauri/src/account_security.rs",
+        "src-tauri/src/shared_account_login/tests.rs"
+      ],
+      "capability": {
+        "summary": "Reject stale native TOTP preparation and install account policy through loopback device pairing.",
+        "guide": "docs/ai-coding-reliability.md",
+        "invariants": [
+          {
+            "name": "Preparation releases session authority; stale publication cannot expose enrollment secrets or consume recovery proof.",
+            "reference": "docs/ai-coding-reliability.md"
+          }
+        ]
+      },
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "shared_account_login::tests::actual_totp_",
+            "shared_account_login::tests::totp_retry_unknown",
+            "shared_account_login::tests::totp_equal_generation",
+            "shared_account_login::tests::v4_pairing_adopts_login"
+          ]
+        }
+      ],
+      "escalation": [
+        "Native authenticator, physical machines, and startup/idle resource measurements remain manual evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -1538,6 +1702,7 @@
         "src-tauri/src/state.rs",
         "src-tauri/src/runtime_bootstrap.rs",
         "src-tauri/src/events.rs",
+        "src-tauri/src/events/",
         "src-tauri/src/commands.rs",
         "src-tauri/src/services/",
         "src-tauri/src/owner_commands.rs",
@@ -1552,6 +1717,7 @@
     {
       "id": "native-acceptance-harness",
       "paths": [
+        "src-tauri/examples/native-contact-eval.rs",
         "scripts/diagnostics/hidden-contacts.mjs",
         "scripts/diagnostics/hidden-contacts-report.mjs",
         "scripts/diagnostics/native-core-scenarios.mjs",

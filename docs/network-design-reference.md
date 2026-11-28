@@ -38,9 +38,11 @@ A client connected to a remote post office can **join that post office's Mesh Ta
 
 ### Network handoff
 
-Discovery observes interface identities/addresses every two seconds and wakes
-existing gated producers after changes, while retaining the 30-second multicast
-join retry. Queue replay and authenticated receipts remain owned by the delivery
+Discovery observes interface identities and addresses on Linux, macOS and Windows system
+notifications and retains a 30-second inventory and multicast join repair. Other
+platforms and failed subscriptions check every two seconds. Windows callbacks
+coalesce into one pending wake for the existing discovery task. An inventory change wakes
+the existing gated producers. Queue replay and authenticated receipts remain owned by the delivery
 runtime. Network-namespace handoff acceptance and its limits are maintained in
 [routed discovery](routed-network-discovery.md#network-changes-and-recovery).
 Physical Wi-Fi/hotspot latency remains a separate hardware acceptance boundary.
@@ -237,9 +239,21 @@ not a successful empty roster. Publication rechecks the exact installed runtime;
 retirement or replacement rejects the captured result. This does not change
 discovery proof persistence, current account binding or presence expiry.
 
+The desktop forwards coalesced roster changes as installation-scoped hints.
+Roster-only renewals bypass the durable reception page and its ACK. A retired
+runtime or locked app cannot publish them to the active renderer. Startup and
+foreground repair read current state independently of these hints, and local
+presence still expires from its last observed deadline if a hint is lost. While
+the desktop document is hidden, these roster hints do not start presence or
+roster queries. Foreground activation reconciles current state. Durable message
+wakes continue to be processed while hidden.
+
 An ordinary roster invalidation shares one lazy, event-owned peer/people
-observation between the chat and presence consumers. It is not reusable across
-events or runtime generations. Group revision and projection run separately;
+observation between the chat and presence consumers. The chat consumer uses the
+identity admitted with that peer snapshot. If the observation fails, a separate
+identity check distinguishes runtime loss or replacement from roster failure.
+The observation is scoped to its event and runtime generation. Group revision
+and projection run separately;
 holding or failing them must not prevent peer publication. Equal applied group
 revisions return an explicit unchanged result without another peer snapshot or
 group projection. Changed inputs and forced repair use a coherent full response.
@@ -365,8 +379,10 @@ Transport-only authentication cannot renew the public observation deadline.
 Historical-route authentication probes run once per device, with its addresses
 sharing the existing bounded route race. Their five-second schedule starts at
 the beginning of each round, without overlapping rounds or appending another
-sleep after slow authentication. A cached address must not allocate a separate
-probe lane for the same device. Only permitted fresh public authentication can
+sleep after slow authentication. When the cache has no endpoints, roster
+changes, the first durably recorded endpoint and network changes own probe
+wakeup. Empty discovery snapshots do not dispatch blocking persistence work.
+A cached address must not allocate a separate probe lane for the same device. Only permitted fresh public authentication can
 renew presence; the fifteen-second observation lease is unchanged.
 Periodic probes reuse sufficiently fresh direct signed discovery for the same
 full device, account, role and exact endpoint. The existing worker schedules the
@@ -542,7 +558,10 @@ existing retained-destination recovery owner, so either scope may complete while
 is blocked. Only exact authenticated recipient receipts establish Delivered;
 ordinary Have and opaque relay custody remain separate evidence. An empty early
 receipt round cannot settle a fresh send: after positive original custody, retain
-the existing bounded post-original control pull while that exact work remains.
+the bounded post-original control pull while that exact work remains. When the
+independent control round has already completed, the original exchange can issue
+that pull on its authenticated stream immediately after positive Have. An
+unavailable continuation falls back to the existing bounded control pull.
 Immediate best-effort flush retains payload-custody-before-control ordering,
 including file offers: a failed payload cannot start a receipt-control exchange.
 Retained automatic recovery independently polls all receipt-eligible originals,
@@ -772,6 +791,16 @@ sequenceDiagram
 
 The useful conceptual states are **accepted locally**, **held somewhere**, **recipient confirmed** and **read**. These are distinct evidence types; they are not a requirement that the UI expose four enum values or that every message pass through a relay-held state. Read status requires its own supported user/protocol action.
 
+An awaiting private message can show a post-office icon when an authenticated
+office confirms the exact outer envelope. The sender associates the stronger
+registered-office icon with a current, non-conflicting registration for the same
+recipient device and the same office. Registration describes an office association
+and carries no physical location assertion. Confirmation from a transit office
+does not establish a copy at a different office. The observations are bounded to
+the sender runtime and follow the existing delivery invalidation path. The same
+bounded publication attempt checks the actual envelope scope, including the
+federated scope when the legacy copy cannot be confirmed. A recipient receipt replaces either mailbox icon.
+
 ### B. Cross-site discovery and opaque federation
 
 ```mermaid
@@ -802,13 +831,16 @@ There are two wrapper scopes. Legacy opaque copies bind the device pair and a pa
 
 For an explicit healthy preference P, the shared candidate policy keeps P first.
 Automatic candidates use unclamped authenticated handshake/control latency
-estimates from the bounded session timing owner; timeout penalties and existing
-retry cooldowns demote failed paths. Samples expire after 120 seconds and clear
+estimates from the bounded session timing owner. Timeout penalties can demote a
+path before its first successful sample, and existing retry cooldowns still govern
+eligibility. Samples expire after 120 seconds and clear
 on network changes. Cold routes retain local-first defaults, with known fresh
 origin distance contributing a small forwarding allowance (50 ms per hop;
 unknown distance uses four hops). These are estimates of usable relay paths,
 not measured end-to-end delivery latency or a global shortest-path guarantee.
-Equal costs retain stable ordering. All eligible feature paths reuse the owner.
+Equal costs retain stable ordering. Targeted uploads and pulls use the destination
+or sender's fresh introduction distance. A general mailbox drain still considers
+every eligible relay because there may be ciphertext on more than one.
 Bounded batches always include the current best candidate and rotate three
 alternatives; existing upload concurrency races two attempts so a silent relay
 cannot monopolize progress. Source presentation and communication selection
@@ -1116,6 +1148,14 @@ chunk-page request. Media in a channel with no other members can still reclaim
 transient chunks after its durable local copy is verified.
 
 ### Ordinary file custody
+
+Direct attachment recovery assigns bounded, disjoint sequence attempts to
+authorized device sources. An exact response must match the requested file,
+signed author and sequence before normal event admission. A relay continues to
+serve opaque mailbox bodies by their outer IDs. When one of those bodies adds
+a retained attachment block, it wakes the direct recovery owner, which checks
+the same durable log before issuing further requests. Competing relays defer an
+already active mailbox-body request without consuming its cursor.
 
 The group-file retry owner distinguishes paid bounded preparation from an
 unavailable dependency. A stale checkpoint preserves the launch backoff;
@@ -2873,6 +2913,18 @@ without weakening privacy, erasure or authority invalidation. History uploads
 retain their existing binding/refresh lifecycle, including dormant upload caches;
 they do not inherit this ordinary exchange lease.
 
+Retained range selections can still be partially prepared. Cache checkout
+requalifies ownership and authority; it does not certify readiness. Compatibility
+rounds and exact-custody responses enter through the backend's prepared-view
+operation, which resumes cached preparation under the same validation,
+yielding and cancellation rules used for fresh views. Bounded rounds retain
+their preparation limit and unfinished continuation; they do not acquire an
+unbounded fallback by reusing a cached selection. An active range token also
+describes only its issued root: direct exact-custody handling reuses that view
+only after readiness and the current source/authority stamp are qualified.
+Otherwise the query uses the prepared responder, preserving the separate range
+continuation instead of fabricating a negative answer or closing the stream.
+
 Direct participant fingerprint probes consult the existing bounded projection
 metadata cache before constructing a historical selection. Paged summaries are
 qualified by the exact current history stamp, including source, identity,
@@ -3109,6 +3161,11 @@ Local mutations, remote replacement or revision changes immediately restore
 normal preparation and current send checks. Hints contain no event bodies and
 never skip the rotating offer selector, so later unseen offers retain their turn.
 Legacy exchanges and the three-second receive cadence remain unchanged.
+A broad source invalidation wakes an already owned mailbox scope. An empty
+receive turn retains its next eligible deadline even if that invalidation
+arrives during the turn. Group mailbox candidates need an exact historical
+device proof before canonical membership is checked, and each identity is
+qualified once per selection turn.
 
 Completed upload qualifications are kept in the existing bounded signed
 checkpoint store independently of those four heavyweight views. Rotating through
@@ -3919,7 +3976,11 @@ Account-channel and custody schedulers observe this storage-backed hint through
 the existing single local-repair slot. The actual blocking worker owns its slot
 and retirement admission through cancellation; observation returns only after
 releasing them, before any network exchange. The synchronous projection remains
-available to existing storage workers and direct readers.
+available to existing storage workers and direct readers. Completed account-group
+maintenance without inherited devices can reuse a matching input at the sparse
+repair deadline. Inherited-device repair, distribution refresh, legacy checks and
+incomplete work retain their deadlines. Current authority and exact-source fences
+remain mandatory when publishing an effect.
 The lifetime-owned maintenance cursor retains its pre-work input across bounded
 pages; newer inputs retain a follow-up. Failed publication stays dirty with its
 own five-second retry deadline; a settled pass keeps a five-minute integrity
@@ -3943,3 +4004,11 @@ Periodic discovery, lease refresh and anti-entropy remain required recovery path
 Regression evidence belongs to owning unit/loopback suites and validation contracts.
 Native cross-platform lifecycle and large-workload throughput acceptance remain
 separate from mocked browser behavior and local focused test results.
+
+A range turn may admit a valid owner control that invalidates its own captured
+principal view. After actual record admission, stop using that view, discard its
+old derived checkpoint and return unfinished progress for fresh qualification.
+Do not close a healthy framed stream or acknowledge the obsolete comparison as
+complete. Staleness before admission, staleness with no admitted record, and
+non-staleness storage failures retain their explicit error paths. No invalidated
+view may serve further exports or publish a retained cursor.

@@ -19,6 +19,60 @@ use std::sync::Arc;
 // receive checkpoints without changing their deployed key bytes.
 pub(in crate::node) const HISTORY_PUBLICATION_KEY_SUFFIX: &[u8] = b"\0history-publication-v1";
 
+/// A single transport owner fetches a federated wrapper at a time, even when
+/// multiple relays advertise it. A cancelled owner releases the claim.
+#[derive(Default)]
+pub(in crate::node) struct BodyRequests(
+    std::sync::Mutex<std::collections::HashSet<(ConversationId, EventId)>>,
+);
+
+struct BodyRequest<'a> {
+    owner: &'a BodyRequests,
+    key: (ConversationId, EventId),
+}
+
+impl BodyRequests {
+    fn try_claim(&self, key: (ConversationId, EventId)) -> Option<BodyRequest<'_>> {
+        let mut active = self.0.lock().expect("mailbox body requests");
+        if active.len() >= MAX_PENDING || !active.insert(key) {
+            return None;
+        }
+        Some(BodyRequest { owner: self, key })
+    }
+}
+
+impl Drop for BodyRequest<'_> {
+    fn drop(&mut self) {
+        self.owner
+            .0
+            .lock()
+            .expect("mailbox body requests")
+            .remove(&self.key);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn federated_body_claims_are_exact_and_released_on_cancellation() {
+    let requests = BodyRequests::default();
+    let mailbox = ConversationId::new([1; 32]);
+    let id = EventId::new([2; 32]);
+    let claim = requests.try_claim((mailbox, id)).unwrap();
+    assert!(requests.try_claim((mailbox, id)).is_none());
+    assert!(
+        requests
+            .try_claim((mailbox, EventId::new([3; 32])))
+            .is_some()
+    );
+    assert!(
+        requests
+            .try_claim((ConversationId::new([4; 32]), id))
+            .is_some()
+    );
+    drop(claim);
+    assert!(requests.try_claim((mailbox, id)).is_some());
+}
+
 const MAX_VIEWS: usize = 4;
 const MAX_RECEIVE_OWNERS: usize = 2;
 const UNFINISHED_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -803,6 +857,12 @@ impl Node {
         if retry && self.quiet_pending_retry(p, id)? {
             return Ok(());
         }
+        // A competing relay keeps its existing checkpoint when this request
+        // is deferred. Only validated receipt state may advance the cursor.
+        let _body_request = self
+            .opaque_body_requests
+            .try_claim((p.mailbox.id(), id))
+            .ok_or(session::SessionError::ResourceUnavailable)?;
         let retained = {
             let cache = self.opaque_receive_cache.lock().expect("opaque cache");
             let log = self.log.lock().expect("log lock");

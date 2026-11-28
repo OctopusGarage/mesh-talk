@@ -80,6 +80,7 @@ pub(in crate::node) struct PrivacyControl {
     pub generation: AtomicU64,
     pub projection_revision: AtomicU64,
     pub route_probe_cursor: AtomicU64,
+    pub route_probe_work: Arc<tokio::sync::Notify>,
     pub route_probe_retries: Mutex<super::privacy_routing::PrivateProbeRetries>,
     // Last: legacy privacy files and admission captures drop before storage.
     _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
@@ -92,6 +93,7 @@ impl Default for PrivacyControl {
             generation: AtomicU64::default(),
             projection_revision: AtomicU64::default(),
             route_probe_cursor: AtomicU64::default(),
+            route_probe_work: Arc::default(),
             route_probe_retries: Mutex::new(super::privacy_routing::private_probe_retries()),
             _storage: None,
         }
@@ -191,10 +193,39 @@ impl Node {
         {
             return Err(denied());
         }
-        let policy = PrivacyPolicy::open(&directory.join("privacy.policy"), password)?;
+        let policy_path = directory.join("privacy.policy");
+        let proof_path = directory.join("peer-proofs");
+        let route_path = directory.join("peer-routes");
+        let open_proofs = || PeerDirectory::open(&proof_path, password);
+        let open_routes = || super::privacy_routes::RouteCache::open(&route_path, password);
+        // Reopening existing files does independent, read-only work. Keep
+        // first-start creation and recovery of missing files ordered.
+        let (policy, proofs, routes) = if proof_path.is_file() && route_path.is_file() {
+            std::thread::scope(|scope| {
+                let proofs = scope.spawn(open_proofs);
+                let routes = scope.spawn(open_routes);
+                let policy = PrivacyPolicy::open(&policy_path, password);
+                (
+                    policy,
+                    Some(
+                        proofs
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    ),
+                    Some(
+                        routes
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    ),
+                )
+            })
+        } else {
+            (PrivacyPolicy::open(&policy_path, password), None, None)
+        };
+        let policy = policy?;
         visibility.initialize_public(!policy.snapshot().invisible)?;
         visibility.initialize_physical_lan_only(self.physical_lan_only())?;
-        let mut proofs = PeerDirectory::open(&directory.join("peer-proofs"), password)?;
+        let mut proofs = proofs.unwrap_or_else(open_proofs)?;
         proofs.record_own(own, &self.identity.public())?;
         for device in self.linked_devices() {
             proofs.authorize_linked_device(device.clone(), &self.account_id())?;
@@ -203,8 +234,9 @@ impl Node {
                 .expect("roster lock not poisoned")
                 .authorize_linked_account(&device.public, &device.certificate);
         }
-        let routes =
-            super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
+        let mut routes = routes.unwrap_or_else(open_routes)?;
+        let has_routes = !routes.is_empty();
+        routes.observe_first_route(self.privacy.route_probe_work.clone());
         let next = PrivacyState {
             policy,
             proofs,
@@ -218,6 +250,9 @@ impl Node {
         }
         *state = Some(next);
         drop(state);
+        if has_routes {
+            self.privacy.route_probe_work.notify_one();
+        }
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.
@@ -229,9 +264,11 @@ impl Node {
             .as_ref()
             .map(|s| s.policy.snapshot())
             .unwrap_or(PrivacySnapshot {
-                version: 1,
+                version: 2,
                 invisible: false,
                 allowed_accounts: Vec::new(),
+                contacts_only: false,
+                blocked_accounts: Vec::new(),
             })
     }
     /// Persist visibility and synchronize disclosure boundaries on a configured node.
@@ -346,6 +383,70 @@ impl Node {
         }
         Ok(())
     }
+    /// Update personal admission under the same gate as receive operations.
+    pub async fn set_personal_privacy_guarded(
+        &self,
+        account: Option<&str>,
+        enabled: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        let _wake = self.profile_policy_wake();
+        let _operation = self.privacy.gate.write().await;
+        authorize(&mut || {
+            if account == Some(self.account_id().as_str()) {
+                return Err(denied());
+            }
+            let mut guard = self
+                .privacy
+                .state
+                .write()
+                .expect("privacy lock not poisoned");
+            let state = guard.as_mut().ok_or_else(denied)?;
+            let changed = match account {
+                Some(account) => state.policy.set_blocked(account, enabled)?,
+                None => state.policy.set_contacts_only(enabled)?,
+            };
+            if changed {
+                self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn personal_contacts_only(&self) -> bool {
+        self.privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .is_some_and(|state| state.policy.contacts_only())
+    }
+
+    pub(super) fn personal_peer_allowed(
+        &self,
+        public: &PublicIdentity,
+        announcement: Option<&Announce>,
+    ) -> bool {
+        let guard = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        let Some(state) = guard
+            .as_ref()
+            .filter(|state| state.policy.has_personal_restrictions())
+        else {
+            return true;
+        };
+        let account = state.proofs.account_for(public).or_else(|| {
+            announcement
+                .filter(|proof| proof.public() == *public && proof.verify())
+                .and_then(Announce::account_id)
+        });
+        account.as_deref() == Some(self.account_id().as_str())
+            || state.policy.allows_personal(account.as_deref())
+    }
+
     /// Inspect current signed claims without persisting discovery or granting trust.
     pub fn account_binding_changes(&self, account: &str) -> Vec<AccountBindingChange> {
         let guard = self
@@ -1136,6 +1237,9 @@ impl Node {
             .runtime_work
             .admit()
             .ok_or_else(|| io::Error::other("node runtime retired"))?;
+        if snapshot.0.is_empty() && snapshot.1.is_empty() {
+            return Ok(Vec::new());
+        }
         #[cfg(test)]
         let hook = self.peer_snapshot_hook.lock().unwrap().take();
         work.spawn_blocking(move || {

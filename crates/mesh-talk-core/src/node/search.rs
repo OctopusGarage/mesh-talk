@@ -49,7 +49,7 @@ pub struct SearchContext {
 pub struct RecentSearchResults {
     pub hits: Vec<ReferencedSearchHit>,
     /// Window entries include files and recall tombstones, not just text matches.
-    /// Canonical scans retain O(history) metadata and decode only the window.
+    /// Ready canonical ranks select the window before transcript hydration.
     pub per_conversation_limit: usize,
 }
 
@@ -88,8 +88,7 @@ impl Node {
     /// recovered IDs and channel causal ordering. Files and recall tombstones use
     /// window slots; only visible text is matched. A zero sentinel becomes no ID.
     ///
-    /// Canonical projection scans retained metadata and decodes only the selected
-    /// window. Scan time and identity/causal metadata remain proportional to history.
+    /// Canonical projection can prepare stale ranks before decoding the selected window.
     pub fn search_recent(&self, query: &str) -> Result<RecentSearchResults, super::NodeError> {
         self.search_recent_limited(query, usize::MAX)
     }
@@ -97,7 +96,7 @@ impl Node {
     /// The newest `limit` matches from the same canonical recent windows as
     /// [`Node::search_recent`]. Retains at most `limit` accumulated hits between
     /// conversations, plus the current conversation's 2,000-entry window.
-    /// Metadata scans still cover retained history in every eligible conversation.
+    /// Each eligible conversation still selects its recent history window.
     pub fn search_recent_limited(
         &self,
         query: &str,
@@ -111,7 +110,12 @@ impl Node {
         if q.is_empty() || limit == 0 {
             return Ok(response);
         }
-        for conversation in self.search_conversations()? {
+        // The unlimited SDK path retains its stable sort. A capped query keeps
+        // only the best candidates and uses traversal order to break clock ties.
+        let mut newest = (limit != usize::MAX).then(std::collections::BTreeMap::new);
+        for (conversation_order, conversation) in
+            self.search_conversations()?.into_iter().enumerate()
+        {
             let history = match &conversation.source {
                 SearchSource::Account(account) => {
                     self.account_history(account, RECENT_HISTORY_LIMIT)?
@@ -123,7 +127,20 @@ impl Node {
                     self.dm_history(public, RECENT_HISTORY_LIMIT)?
                 }
             };
-            for entry in history.into_iter().rev() {
+            for (row_order, entry) in history.into_iter().rev().enumerate() {
+                let rank = (
+                    entry.wall_clock,
+                    std::cmp::Reverse(conversation_order),
+                    std::cmp::Reverse(row_order),
+                );
+                if newest.as_ref().is_some_and(|hits| {
+                    hits.len() == limit
+                        && hits
+                            .first_key_value()
+                            .is_some_and(|(worst, _)| rank <= *worst)
+                }) {
+                    continue;
+                }
                 if entry.recalled
                     || !String::from_utf8_lossy(&entry.text)
                         .to_lowercase()
@@ -146,22 +163,28 @@ impl Node {
                         message_id,
                     },
                 };
-                response.hits.push(ReferencedSearchHit {
+                let hit = ReferencedSearchHit {
                     hit: conversation.hit(entry.from_me, entry.who, entry.text, entry.wall_clock),
                     reference,
                     expires_at_ms: entry.expires_at_ms,
-                });
-            }
-            if limit != usize::MAX {
-                response
-                    .hits
-                    .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
-                response.hits.truncate(limit);
+                };
+                if let Some(hits) = newest.as_mut() {
+                    if hits.len() == limit {
+                        hits.pop_first();
+                    }
+                    hits.insert(rank, hit);
+                } else {
+                    response.hits.push(hit);
+                }
             }
         }
-        response
-            .hits
-            .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
+        if let Some(hits) = newest {
+            response.hits = hits.into_values().rev().collect();
+        } else {
+            response
+                .hits
+                .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
+        }
         Ok(response)
     }
 

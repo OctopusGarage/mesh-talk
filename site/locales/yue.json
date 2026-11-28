@@ -244,6 +244,7 @@
   "Choose a desktop download": "選擇桌面版下載",
   "{label} is unavailable in this release.": "呢個版本未有提供 {label}。",
   "ZIP · {size} MB": "ZIP · {size} MB",
+  "{format} · {size} MB": "{format} · {size} MB",
   "Stable {version} · Choose your computer’s architecture. Downloads are hosted on GitHub.": "穩定版 {version} · 請揀選電腦架構。下載檔案存放喺 GitHub。",
   "Stable {version} · {platform} · {label} · {size} MB ZIP": "穩定版 {version} · {platform} · {label} · {size} MB ZIP",
   "Open Mesh-Talk on your Mac": "在 Mac 上開啟 Mesh-Talk",

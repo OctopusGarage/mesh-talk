@@ -221,3 +221,69 @@ it("never applies a page addressed to another account or installation", async ()
   expect(failed).toHaveBeenCalledTimes(1);
   delivery.stop();
 });
+
+it("backs off repeated pull failures and restarts at the initial deadline after progress", async () => {
+  vi.useFakeTimers();
+  const failure = new Error("stale cursor");
+  const pull = vi
+    .fn()
+    .mockRejectedValueOnce(failure)
+    .mockRejectedValueOnce(failure)
+    .mockResolvedValueOnce(page(1))
+    .mockRejectedValue(failure);
+  const delivery = createReceptionDelivery({
+    scope,
+    cursor: null,
+    current: () => true,
+    pull,
+    apply: vi.fn(),
+    persist: vi.fn(),
+    acknowledge: vi.fn().mockResolvedValue(false),
+    failed: vi.fn(),
+  });
+  try {
+    await delivery.wake();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pull).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(pull).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pull).toHaveBeenCalledTimes(3);
+    await delivery.wake();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pull).toHaveBeenCalledTimes(5);
+  } finally {
+    delivery.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("caps automatic reception retries and cancels the deadline on owner retirement", async () => {
+  vi.useFakeTimers();
+  const pull = vi.fn().mockRejectedValue(new Error("unavailable"));
+  const delivery = createReceptionDelivery({
+    scope,
+    cursor: null,
+    current: () => true,
+    pull,
+    apply: vi.fn(),
+    persist: vi.fn(),
+    acknowledge: vi.fn(),
+    failed: vi.fn(),
+  });
+  try {
+    await delivery.wake();
+    await vi.advanceTimersByTimeAsync(63_000);
+    expect(pull).toHaveBeenCalledTimes(7);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(pull).toHaveBeenCalledTimes(7);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pull).toHaveBeenCalledTimes(8);
+    delivery.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(pull).toHaveBeenCalledTimes(8);
+  } finally {
+    delivery.stop();
+    vi.useRealTimers();
+  }
+});

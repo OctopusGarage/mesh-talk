@@ -342,7 +342,7 @@ impl TranscriptRepository {
             return Err(invalid("transcript row exceeds payload budget"));
         }
         let mut statement =
-            c.prepare("SELECT sender,plaintext FROM transcript_bodies WHERE ordinal=?1")?;
+            c.prepare_cached("SELECT sender,plaintext FROM transcript_bodies WHERE ordinal=?1")?;
         let mut rows = statement.query([h.ordinal])?;
         let row = rows
             .next()?

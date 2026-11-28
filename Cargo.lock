@@ -1055,9 +1055,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "cookie"
-version = "0.18.1"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "time",
  "version_check",
@@ -1916,9 +1916,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3356,6 +3356,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-foundation-blob"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e1c46bff634c889d921ed74315ac0b08905663d6ec7fa1995006e0ce25ad93d"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "futures-util",
+ "mesh-foundation-connect",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-foundation-connect"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c6787411e2a6b27c4220b73c9ca8da16afdb633dd6ea3eb4014a301c062c43f"
+dependencies = [
+ "futures-util",
+ "if-addrs",
+ "log",
+ "snow",
+ "socket2",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mesh-foundation-e2ee"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9939d60bb53fbaa2745346e57f9b27d5d98ac2a5a97c655a95238e12282da718"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "hkdf",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-foundation-identity"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99ee10b31c8eaf0911d29d0432ff6f4e1a553f48eecee68b85a73ecb98304319"
+dependencies = [
+ "bincode",
+ "ed25519-dalek",
+ "hex",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mesh-foundation-mailbox"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "437044cad8511249a6b4eaa26c4d6c6a413a46d6d3e6690de772cbbd6855b551"
+dependencies = [
+ "mesh-foundation-replication",
+ "serde",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mesh-foundation-replication"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e1259648328b2a2c7058af266ff81147b831f40f8865db34b66918022070a3"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mesh-foundation-storage"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "379e69ae6e2f1a23114f40ea89fda8eb05cd6bcfa8b5fa31e4a364479e71c34a"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "log",
+ "rand_core 0.6.4",
+ "ring",
+ "serde",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "mesh-talk"
 version = "0.4.6"
 dependencies = [
@@ -3365,6 +3464,7 @@ dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.1",
  "fs4",
+ "global-hotkey",
  "hex",
  "image",
  "keyring",
@@ -3383,7 +3483,9 @@ dependencies = [
  "rand_core 0.6.4",
  "raw-window-handle",
  "rcgen",
+ "regex",
  "reqwest",
+ "ring",
  "security-framework 3.7.0",
  "security-framework-sys",
  "semver",
@@ -3431,10 +3533,18 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "mesh-foundation-blob",
+ "mesh-foundation-connect",
+ "mesh-foundation-e2ee",
+ "mesh-foundation-identity",
+ "mesh-foundation-replication",
+ "mesh-foundation-storage",
  "mesh-talk-core",
+ "mesh-talk-protocol",
  "pbkdf2",
  "rand_chacha",
  "rand_core 0.6.4",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3485,6 +3595,30 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "mesh-talk-protocol"
+version = "0.4.6"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "bincode",
+ "ed25519-dalek",
+ "hex",
+ "hkdf",
+ "log",
+ "mesh-foundation-connect",
+ "mesh-foundation-identity",
+ "mesh-foundation-mailbox",
+ "mesh-foundation-replication",
+ "mesh-foundation-storage",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -6799,9 +6933,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

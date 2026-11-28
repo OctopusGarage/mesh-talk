@@ -8,18 +8,24 @@ use crate::discovery::Announce;
 use crate::identity::account_transition::AccountBindingTransition;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 #[cfg(test)]
+use crate::transport::MAX_FRAME;
+#[cfg(test)]
 use crate::transport::auth::build_auth;
 use crate::transport::handshake::{Handshake, HandshakeOutput};
 use crate::transport::presence_auth;
 use crate::transport::session::Session;
-use crate::transport::{MAX_FRAME, TransportError, VerifiedPeer};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::transport::{TransportError, VerifiedPeer};
+pub(crate) use mesh_connect::frame::{read_frame, write_frame};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 #[cfg(test)]
 type TestFrameObserver = dyn Fn(bool, &[u8]) + Send + Sync;
 
 /// An established, authenticated, encrypted channel to one peer.
 pub struct SecureChannel<S> {
+    _diagnostics: super::diagnostics::ChannelLifetime,
     stream: S,
     session: Session,
     peer: VerifiedPeer,
@@ -154,6 +160,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::UnexpectedPeer);
         }
         Ok(Self {
+            _diagnostics: super::diagnostics::ChannelLifetime::new(),
             stream,
             session,
             peer,
@@ -266,6 +273,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         .await?;
 
         Ok(Self {
+            _diagnostics: super::diagnostics::ChannelLifetime::new(),
             stream,
             session,
             peer,
@@ -370,7 +378,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             })
             .await
             .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
-            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
+            let bytes = bytes?;
+            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes);
+            super::diagnostics::frame(true, bytes as usize);
             #[cfg(test)]
             self.observe_test_frame(true, plaintext);
             return Ok(());
@@ -378,6 +388,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         let ct = self.encrypt_if(plaintext, &mut authorize)?;
         write_frame(&mut self.stream, &ct).await?;
         self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
+        super::diagnostics::frame(true, ct.len() + 4);
         #[cfg(test)]
         self.observe_test_frame(true, plaintext);
         Ok(())
@@ -411,6 +422,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::AdmissionDenied);
         }
         let plaintext = self.session.decrypt(&ct)?;
+        super::diagnostics::frame(false, ct.len() + 4);
         #[cfg(test)]
         self.observe_test_frame(false, &plaintext);
         Ok(plaintext)
@@ -544,57 +556,6 @@ fn verify_peer(
     presence_auth::verify(&bytes, handshake_hash, remote_static)
 }
 
-/// Write a length-prefixed frame (4-byte big-endian length + blob) and flush.
-pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    blob: &[u8],
-) -> Result<(), TransportError> {
-    let len = blob.len() as u32;
-    w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(blob).await?;
-    w.flush().await?;
-    Ok(())
-}
-
-/// Read one length-prefixed frame, rejecting absurd lengths before allocating.
-pub(crate) async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
-    fn incomplete_frame(error: std::io::Error) -> std::io::Error {
-        use std::io::ErrorKind;
-        match error.kind() {
-            ErrorKind::UnexpectedEof
-            | ErrorKind::ConnectionReset
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::BrokenPipe
-            | ErrorKind::NotConnected => std::io::Error::new(ErrorKind::InvalidData, error),
-            _ => error,
-        }
-    }
-
-    let mut len_buf = [0u8; 4];
-    // Only a close before any frame bytes is a compatibility/liveness signal.
-    // Partial framing is malformed data and must never authorize a downgrade.
-    let received = r.read(&mut len_buf).await?;
-    if received == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "transport closed at frame boundary",
-        )
-        .into());
-    }
-    if received < len_buf.len() {
-        r.read_exact(&mut len_buf[received..])
-            .await
-            .map_err(incomplete_frame)?;
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_FRAME {
-        return Err(TransportError::FrameTooLarge(len));
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await.map_err(incomplete_frame)?;
-    Ok(buf)
-}
-
 #[cfg(test)]
 #[path = "admission_tests.rs"]
 mod admission_tests;
@@ -602,6 +563,27 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "presence_tests.rs"]
 mod presence_tests;
+
+impl<S: AsyncRead + AsyncWrite + Unpin> mesh_blob::session::BlobSession for SecureChannel<S> {
+    async fn send(&mut self, frame: &[u8]) -> Result<(), mesh_connect::TransportError> {
+        SecureChannel::send(self, frame)
+            .await
+            .map_err(blob_transport_error)
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>, mesh_connect::TransportError> {
+        SecureChannel::recv(self)
+            .await
+            .map_err(blob_transport_error)
+    }
+}
+
+fn blob_transport_error(error: TransportError) -> mesh_connect::TransportError {
+    match error {
+        TransportError::Io(error) => mesh_connect::TransportError::Io(error),
+        error => mesh_connect::TransportError::Io(std::io::Error::other(error)),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -715,6 +697,62 @@ mod tests {
         assert_eq!(got, b"pong");
 
         server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn authenticated_talk_channel_carries_sdk_chunk_requests() {
+        use mesh_blob::{
+            ChunkSource,
+            session::{AuthenticatedChunkSource, respond_to_request},
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let reader = DeviceIdentity::generate();
+        let holder = DeviceIdentity::generate();
+        let reader_public = reader.public();
+        let holder_public = holder.public();
+        let object = [7; 32];
+
+        let server = async {
+            let mut channel = SecureChannel::accept(server_io, &holder).await.unwrap();
+            for _ in 0..2 {
+                let request = channel.recv().await.unwrap();
+                let reply = respond_to_request(
+                    &request,
+                    channel.peer_identity(),
+                    |peer, id, index, length| {
+                        assert_eq!((peer, id, index, length), (&reader_public, object, 0, 2));
+                        Some(b"ok".to_vec())
+                    },
+                    |peer, id, start, count| {
+                        assert_eq!((peer, id, start, count), (&reader_public, object, 0, 1));
+                        Some(vec![true])
+                    },
+                )
+                .unwrap();
+                channel.send(&reply).await.unwrap();
+            }
+        };
+        let client = async {
+            let channel = SecureChannel::connect(client_io, &reader, Some(&holder_public))
+                .await
+                .unwrap();
+            let source = AuthenticatedChunkSource::discover(
+                object,
+                1,
+                1,
+                channel,
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(source.fetch(0, 2).await.unwrap(), b"ok");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(client, server);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

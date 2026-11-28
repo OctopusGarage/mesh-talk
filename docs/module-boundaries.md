@@ -89,7 +89,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Auth/runtime ownership                         | `src-tauri/src/state.rs`, `chat_commands/state.rs`, `runtime_bootstrap.rs`, `runtime_admission.rs`, `linked_account.rs`, `owner_commands.rs`, `owner_commands/search.rs`          | Reuse session leases and runtime installation checks; commands adapt inputs and errors. Frontend work uses `ui/store/ownership.ts`.                                                                                                                                                                 |
 | Message UI transitions                         | `ui/store/chat.ts`, `outgoingIntent.ts`, `conversationState.ts`, `chatRuntimeEffects.ts`                                                                                          | Intents own acceptance, conversation state owns cache transitions, effects bridge feature stores. Do not settle messages independently in components.                                                                                                                                               |
 | Settings/privacy                               | `src-tauri/src/settings.rs`, `privacy_commands.rs`, `ui/store/settings.ts`, `privacy.ts`                                                                                          | `ui/lib/privacySettings.ts` owns presentation defaults/projection; `settingsDialogSession.ts` owns load/save generations. Network admission remains in core.                                                                                                                                        |
-| Contact presentation                           | `src-tauri/src/contact_policy.rs`, `src-tauri/src/contact_policy/expiry.rs`, `ui/store/contactPolicy.ts`, `ui/store/rosterRefresh.ts`, `ui/lib/contactVisibility.ts`              | Hiding and [never-chatted expiry](privacy-controls.md#discovered-contacts-without-chat-history) filter presentation, not communication. Expiry uses persistent first observation and attributable sticky history; preserve routing, shared groups, delivery and explicit personal controls.         |
+| Contact presentation                           | `src-tauri/src/contact_policy.rs`, `src-tauri/src/contact_policy/expiry.rs`, `ui/store/contactPolicy.ts`, `ui/store/rosterRefresh.ts`, `ui/lib/contactVisibility.ts`              | Hiding and [never-chatted expiry](privacy-controls.md#discovered-contacts-without-chat-history) filter presentation, not communication. Each observed disconnect starts a persisted 24-hour grace period; Online cancels it. Expiry reclaims never-chatted contact metadata without tombstones, preserving attributable history, routing, shared groups, delivery and explicit personal controls. Reuse existing roster and deadline owners.         |
 | Personal conversation removal                  | `core/node/account_documents/personal.rs`, `core/node/lifecycle.rs`, `src-tauri/src/contact_policy/deletion.rs`, `owner_commands/group_operations.rs`                             | Core owns durable account-scoped intent, deletion floors and retryable local cleanup. Host adapts exact-runtime commands; UI offers history choices and clears projections only after actual cleanup. Personal removal never dissolves a group or recalls other accounts' copies.                   |
 | Backup/recovery                                | `core/recovery/`, `core/node/recovery.rs`, `src-tauri/src/recovery.rs`                                                                                                            | Core validates archive/snapshot; host owns staging/publication and runtime barriers; UI presents inspection and confirmation.                                                                                                                                                                       |
 | Appearance/avatars/packs                       | `ui/store/avatars.ts`, `packs.ts`, `ui/lib/theme.ts`, `pack.ts`, `ui/components/identity/`                                                                                        | Reuse identity rendering and pack validation. Do not create feature-specific avatar stores or variant parsers.                                                                                                                                                                                      |
@@ -126,6 +126,12 @@ original reference; failed previews never eagerly fall back to original reads an
 can retry on readiness changes or foreground activation. Protected reveal remains
 separate. Derived images are not persisted as plaintext or substituted for saved
 originals.
+The full-size image preview can recognize one QR result on explicit request.
+It samples the admitted image at up to 1,536 pixels per edge, does recognition
+in a dedicated worker, and releases the worker on completion, timeout or exit.
+The preview shows the payload before offering an external HTTP(S) link or
+opening a known Mesh Talk account conversation. A scanned account ID cannot
+create a contact or grant access. Protected image reveals do not use this path.
 Receiving, loading and unsupported states use a responsive provisional frame
 (up to 320 pixels wide, 4:3 for images and 16:9 for video). Unknown outgoing
 photo geometry uses a compact 192px-wide frame with a static glyph and accessible
@@ -164,8 +170,19 @@ The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
 window-fit size), double-click zoom, bounded pointer dragging, fit reset and
 keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.
 Controls remain outside the clipped image stage. Escape restores trigger focus.
-On macOS, unzoomed images retain native text selection; Option/Alt-drag bypasses
-panning when zoomed. Actual recognition and selection require WKWebView evidence.
+On macOS, **Extract text** invokes the system Vision recognizer on explicit demand
+and displays selectable text with a copy-all action. `ImageTextResult.tsx` owns the
+source-scoped result and retry state; `image_text.rs` owns native admission and OCR.
+Input is PNG bounded to 8 MiB and four million pixels; the renderer downsamples to
+at most 2560 pixels per edge. One actual blocking worker retains global capacity
+through completion, even after the 20-second observer deadline. No OCR work runs
+at startup or idle, and no result is persisted or cached across previews. Session
+and runtime authority are checked before admission and response; closed or replaced
+previews discard completions. Text copying uses the existing sensitive clipboard
+policy, including selected-text copy events. Native multilingual recognition has
+a manual fixture selector; browser mocks do not certify real WKWebView selection.
+The existing opportunistic WebKit selection remains available unzoomed, with
+Option/Alt bypassing panning when zoomed; it is not the extraction provider.
 Ordinary-image context actions use the shared accessible menu, suppress WebKit
 browser defaults and reuse the attachment save/reveal owners. `ui/lib/imageClipboard.ts`
 exports the entire decoded image as PNG, starts the write within user activation,
@@ -979,7 +996,10 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   finish; stale continuations do not record paths into a replacement session.
 - The call store owns local terminal signaling before resource disposal and an
   independent incoming-ring deadline. Disposing local media alone is not a
-  distributed call termination. The local WebRTC diagnostic separately owns a
+  distributed call termination. Window sharing belongs to the same live peer
+  connection and uses an already negotiated outgoing video transceiver. The
+  call owner stops capture and ignores late picker results after retirement.
+  The local WebRTC diagnostic separately owns a
   run generation; closing or unmounting disposes its peers, timers and tracks,
   stops late captures and settles its pending media waits.
 - Own DM/account reaction state uses an account-scoped encrypted projection with
@@ -1545,6 +1565,11 @@ without adding a group transport or claiming recipient delivery. Channel authori
 determines eligible external member principals. The footer distinguishes missing
 status from a known zero count; its status coordinator clears stale projections
 only for the messages and runtime lifetime it requested.
+Native custody reads admit one bounded batch at a time and use participant-owned
+blocking work. The batch releases desktop session and runtime-slot guards during
+the query. Result publication rechecks the exact installed runtime, session and
+app-lock revision. Each row reads its signed record once and rechecks current
+custody and membership facts independently.
 The document store keeps a separate bounded custody-key quota and an owned-file
 scan budget consistent with legal document counts. `media_store.rs` prunes the
 enumerated unreferenced regular files in one pass, preserving live files and
@@ -1605,3 +1630,55 @@ country-flags browser scenario protect selection, local loading, ligature shapin
 and unchanged composer/message text. Real Windows 10 WebView2 acceptance must also
 check colors, selection/copy, deletion, reply/search/reaction surfaces and zoom;
 other-host Chromium and DOM assertions do not establish native visual acceptance.
+
+## Group notification attention
+
+`frontend/src/store/groupMute.ts` projects attention without changing reception or
+read receipts. Group-row and app/tray badges exclude muted ordinary unread; the
+unread review still lists raw unread for recovery. Local account settings own
+`muted_groups`; the portable allowlist excludes this device preference. Native
+presentation reads the current policy, including after queued work executes.
+Existing display-name mention matching supplies the exception, with its existing
+ambiguity; this feature adds no wire identity metadata or broadcast exception.
+Preference writes are serialized and generation checked. No polling or secondary
+message queue is introduced. Native macOS/Windows banners and resource behavior
+require platform acceptance beyond focused policy tests.
+
+## Code-block messages
+
+`frontend/src/lib/codeBlock.ts` owns whole-message fenced-code encoding and
+recognition. Code blocks use the existing encrypted text transport, stored text,
+draft and durable-admission owners; there is no new wire type or schema. The
+encoder chooses a backtick fence longer than any run in the body and adds exactly
+one delimiter newline on each side, preserving body whitespace, CRLF and embedded
+fences. Only complete, whole-message LF-delimited fences with a bounded language
+token become code cards. Mixed prose, malformed fences and unsupported fence
+syntax retain ordinary text presentation. Absent legacy text is non-code and
+must not throw during historical unread reconstruction. Older clients show the
+readable fence.
+
+`Composer.tsx` derives code mode from that same draft string, so conversation
+switches, re-edit and failed admissions retain code and language without another
+draft owner. The explicit code control converts the current draft in either
+direction. Enter inserts a newline in code mode; Send uses the existing admission
+and protection settings. Whitespace-only code cannot be sent. Language selection
+labels the snippet; it does not execute or load a compiler or syntax engine.
+
+`CodeBlockView.tsx` renders escaped literal text in a horizontally scrollable,
+height-bounded card. It never renders HTML, interprets mentions or opens URLs.
+The shared `mentionsName` excludes complete code blocks from channel mention
+classification in live and historical consumers. Normal bubble copy uses the
+existing sensitive clipboard policy and copies the body without fence metadata;
+clipboard failures use the bubble's existing error feedback. Protected messages
+retain their existing reveal lifetime and disable code-copy controls; no additional
+plaintext cache or lifetime is introduced. Forwarding, favorites, search and old
+clients retain the canonical fenced text; compact projections may show fences.
+
+Parsing occurs only for current drafts or rendered messages, and editor DOM exists
+only in the active composer. There are no startup tasks, polling, new dependencies
+or background syntax workers. Existing text admission/resource limits remain
+owned by the send path. Codec, literal-rendering, mention and admission regressions
+are selected in `frontend/validation.json`. Browser/native acceptance must check
+narrow layouts, light/dark contrast, keyboard focus, long-line scrolling, clipboard
+permissions and conversation restore; unit assertions do not establish visual or
+native clipboard acceptance.

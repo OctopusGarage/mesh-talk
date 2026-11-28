@@ -26,7 +26,10 @@ interface Context {
   capture(): { current(): boolean };
   commands: {
     listChannels(): Promise<ChannelInfo[]>;
-    channelMembers(id: string): Promise<ChannelMembersInfo>;
+    channelMembers(
+      id: string,
+      options: { includeAccountAccess: false },
+    ): Promise<ChannelMembersInfo>;
   };
   now?: () => number;
 }
@@ -141,7 +144,9 @@ export function createChannelRefresh(context: Context) {
                   members.set(
                     id,
                     await readWithDeadline(() =>
-                      context.commands.channelMembers(id),
+                      context.commands.channelMembers(id, {
+                        includeAccountAccess: false,
+                      }),
                     ),
                   );
                   if (work.current() && publicationTimer === undefined) {

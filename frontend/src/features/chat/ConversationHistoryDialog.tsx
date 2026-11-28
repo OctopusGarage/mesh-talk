@@ -1,5 +1,5 @@
 import { HighlightedText } from "./HighlightedText";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FileX,
@@ -79,9 +79,7 @@ function HistoryMedia({ message }: { message: ChatMessage }) {
   );
 }
 
-// Per-conversation history pulls the full backlog (the conversation stream itself caps at
-// 200 for live scrolling). The backend history commands clamp to 500, which is the most a
-// single page can return — so this view is complete up to the durable-store window.
+// Local display remains capped at 500, independently of remote paging.
 const FULL_HISTORY_LIMIT = 500;
 const NO_HISTORY: ChatMessage[] = [];
 
@@ -132,6 +130,62 @@ export function ConversationHistoryDialog({
     loading: boolean;
     error: string | null;
   } | null>(null);
+
+  const [refresh, setRefresh] = useState(0);
+  const [remote, setRemote] = useState<{
+    status: string;
+    cursor: string | null;
+    busy: boolean;
+    hasGaps: boolean;
+  } | null>(null);
+  const requestRemote = useRef<((cursor: string | null) => void) | null>(null);
+  useEffect(() => {
+    if (!open || !ready || conversation.kind === "account") return;
+    const lease = captureChatOwnership();
+    let alive = true;
+    let busy = false;
+    let hasGaps = false;
+    const request = async (cursor: string | null) => {
+      if (busy || !alive || !lease.current()) return;
+      busy = true;
+      setRemote((previous) => ({
+        status: previous?.status ?? "loading",
+        cursor,
+        busy: true,
+        hasGaps,
+      }));
+      try {
+        const page = await chat.fetchChannelHistoryPage(
+          conversation.id,
+          cursor,
+        );
+        if (!alive || !lease.current()) return;
+        if (page.status === "blocked") hasGaps = true;
+        else if (cursor === null && page.status === "page") hasGaps = false;
+        setRemote({
+          hasGaps,
+          status: page.status,
+          cursor: page.status === "reset" ? null : page.cursor,
+          busy: false,
+        });
+        if (page.status === "page") setRefresh((value) => value + 1);
+      } catch {
+        if (alive && lease.current())
+          setRemote({ status: "offline", cursor, busy: false, hasGaps });
+      } finally {
+        busy = false;
+      }
+    };
+    setRemote(null);
+    requestRemote.current = (cursor) => {
+      void request(cursor);
+    };
+    void request(null);
+    return () => {
+      alive = false;
+      requestRemote.current = null;
+    };
+  }, [open, ready, conversation.kind, conversation.id]);
 
   const key = convKey(conversation);
   const view = history?.key === key ? history : null;
@@ -193,7 +247,7 @@ export function ConversationHistoryDialog({
     return () => {
       alive = false;
     };
-  }, [open, ready, key, conversation.kind, conversation.id]);
+  }, [open, ready, key, conversation.kind, conversation.id, refresh]);
 
   // Reset the search box each time the dialog opens / re-scopes.
   useEffect(() => {
@@ -309,6 +363,35 @@ export function ConversationHistoryDialog({
           </div>
         </DialogHeader>
 
+        {conversation.kind !== "account" && remote && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {t(
+                `history.remote_${remote.hasGaps ? "blocked" : remote.status}`,
+              )}
+            </span>
+            {!remote.busy &&
+              remote.status !== "unsupported" &&
+              (remote.cursor !== null ||
+                remote.status !== "page" ||
+                remote.hasGaps) && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => requestRemote.current?.(remote.cursor)}
+                >
+                  {t(
+                    remote.cursor !== null &&
+                      (remote.status === "page" || remote.status === "blocked")
+                      ? "history.loadOlder"
+                      : remote.hasGaps && remote.cursor === null
+                        ? "history.retryRecent"
+                        : "history.retryRemote",
+                  )}
+                </Button>
+              )}
+          </div>
+        )}
         {error && <p className="text-xs text-destructive">{error}</p>}
 
         <Tabs defaultValue="all" className="w-full">

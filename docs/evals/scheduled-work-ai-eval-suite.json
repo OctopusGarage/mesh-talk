@@ -1,0 +1,108 @@
+{
+  "name": "mesh-talk-scheduled-work-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-SCHEDULE-001",
+      "name": "native alert work parks and coalesces under its runtime owner",
+      "subject_file": "src-tauri/src/reception_host.rs",
+      "context_files": [
+        "src-tauri/src/runtime_bootstrap.rs",
+        "crates/mesh-talk-core/src/node/ui_state.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/desktop_session.rs",
+        "src-tauri/src/runtime_admission.rs",
+        "crates/mesh-talk-core/src/node/host_reception.rs",
+        "crates/mesh-talk-core/src/node/reception_effects/mod.rs",
+        "docs/scheduled-work.md",
+        "crates/mesh-talk-core/src/node/reception_effects/pages.rs"
+      ],
+      "min_score": 0.85,
+      "scenario": "A desktop logs in with old unread receipts, then remains quiet, receives a burst and switches accounts while a native presentation is pending. Review the native alerts path. Identify the distinction between a source guarantee and actual OS measurements.",
+      "rubric": [
+        "Initial observation uses the captured launch high-water. Old receipt backlog does not replay as live activity.",
+        "Quiet observation awaits a scoped change. The owner uses a one-shot delay only for pending work and bounds receipt reads to one batch of up to eight per second.",
+        "A change during the bounded read or presentation can remain pending. Runtime retirement and authority protect native presentation.",
+        "Native presentation is independent of durable renderer acknowledgement. Source or simulated-clock evidence does not establish OS wakeup, energy or CPU savings."
+      ]
+    },
+    {
+      "id": "MT-SCHEDULE-002",
+      "name": "device-link status wakes on scoped events and retains explicit repair",
+      "subject_file": "frontend/src/features/chat/LinkDeviceDialog.tsx",
+      "context_files": [
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/lib/readDeadline.ts",
+        "frontend/src/lib/syncInvalidation.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts"
+      ],
+      "min_score": 0.85,
+      "scenario": "Account A sees document and sync-state changes, including notifications from account B. A status read stalls beyond the UI watchdog, the dialog hides, and a new runtime replaces the old dialog. Review current-owner refresh, fallback and read ownership.",
+      "rubric": [
+        "Device-link status responds to same-owner sync-status and compatible broad state invalidations. Other owners and pure document signals do not start the read.",
+        "The visible fallback remains five seconds to cover time-derived availability. Account-login status stays on its separate cadence and meaning.",
+        "A caller timeout does not release the actual native read slot or start overlapping work within the current reader. An admitted pending wake is bounded.",
+        "Hidden state parks the timer, activation restores an observation, and dialog retirement removes the listeners and suppresses stale publication."
+      ]
+    },
+    {
+      "id": "MT-SCHEDULE-003",
+      "name": "native notification permission uses timer-free foreground recovery",
+      "subject_file": "frontend/src/lib/notify.ts",
+      "context_files": [
+        "frontend/src/lib/recoveryRefresh.ts",
+        "frontend/src/lib/readDeadline.ts",
+        "frontend/src/lib/notify.test.ts",
+        "frontend/src/lib/recoveryRefresh.test.ts",
+        "frontend/src/lib/api/notifications.ts",
+        "src-tauri/src/notifications.rs",
+        "src-tauri/src/notifications/mac_callbacks.rs",
+        "docs/platform-validation.md"
+      ],
+      "min_score": 0.85,
+      "scenario": "A user returns from system notification settings. Focus and visibility fire in the same turn, a second observer is mounted, and the active observer stops while an activation is pending. Review periodic work, permission checks and authorization.",
+      "rubric": [
+        "The owner checks once at startup and uses the shared recovery component without a periodic timer.",
+        "Foreground signals from the same turn coalesce. Permission reads share admitted native work and never request authorization themselves.",
+        "Disposal removes listeners and prevents a queued foreground callback from running after disposal.",
+        "Observation errors and unknown permission are handled without covering up the distinction between a browser or model check and a real OS prompt."
+      ]
+    },
+    {
+      "id": "MT-SCHEDULE-004",
+      "name": "AI guidance routes scheduling changes to owners and preserves recovery",
+      "subject_file": "docs/scheduled-work.md",
+      "context_files": [
+        "AGENTS.md",
+        "docs/event-driven-design.md",
+        "docs/performance-requirements.md",
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/lib/readDeadline.ts",
+        "frontend/src/lib/recoveryRefresh.ts",
+        "frontend/src/store/chatExpiry.ts",
+        "frontend/src/store/rosterRefresh.ts",
+        "frontend/src/lib/notify.ts",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "src-tauri/src/network_cost/mod.rs",
+        "src-tauri/src/reception_host.rs",
+        "crates/mesh-talk-core/src/node/runtime_work.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs"
+      ],
+      "min_score": 0.85,
+      "scenario": "An AI contributor wants to replace a polling loop and add consumers for a retry, a foreground permission recheck and an expiry. Evaluate discoverability and registration policy. Distinguish existing components from proposed contracts.",
+      "rubric": [
+        "Contributor instructions route scheduling and event changes to the maintained guides. The guides link real owners and separate shipped entry points from proposed shared interfaces.",
+        "Guidance distinguishes deadlines, retries, foreground recovery, active cadence and committed business events, including clock choice, overdue work and bounded concurrency.",
+        "Registration describes authority, lifecycle, disposal, in-flight cancellation and stale completion. Recovery protects against missed notifications and restarts.",
+        "Verification calls for idle, active, return-to-idle and relevant failure controls. Simulated-time or model results cannot be counted as native performance measurements."
+      ]
+    }
+  ]
+}

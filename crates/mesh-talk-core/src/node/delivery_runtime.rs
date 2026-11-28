@@ -52,13 +52,19 @@ enum DeliveryAttemptContext {
 pub(in crate::node) enum Reconciliation {
     Advanced,
     Quiet,
+    /// A clean bounded exchange has retained work; no storage/delivery claim.
+    More,
+    /// Source policy/capacity blocks progress; retain pending state for sparse repair.
+    Limited,
     Deferred,
 }
 impl Reconciliation {
     fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::Advanced, _) | (_, Self::Advanced) => Self::Advanced,
+            (Self::More, _) | (_, Self::More) => Self::More,
             (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            (Self::Limited, _) | (_, Self::Limited) => Self::Limited,
             _ => Self::Quiet,
         }
     }
@@ -70,17 +76,55 @@ impl Reconciliation {
         now: std::time::Instant,
     ) {
         match self {
+            Self::More => retries.settled(key, routes, std::time::Duration::ZERO, now),
+            Self::Limited => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             Self::Quiet => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             other => retries.finished(key, routes, other == Self::Advanced, now),
         }
     }
-    fn from_progress(progress: bool) -> Self {
-        if progress {
-            Self::Advanced
+    fn schedule_destination_peer<K: Eq + std::hash::Hash + Clone, R: Eq + Clone>(
+        self,
+        retries: &mut super::delivery_retry::RetrySchedule<K, R>,
+        key: K,
+        routes: R,
+        now: std::time::Instant,
+    ) {
+        if self == Self::Quiet {
+            // Quiet custody belongs to the exact event's receipt hints. A healthy
+            // completed poll must not park a newly queued event on this peer.
+            retries.forget(&key);
         } else {
-            Self::Deferred
+            self.schedule(retries, key, routes, now);
         }
     }
+    fn receipt_result(custody: bool, failed: bool, continuation: TransferContinuation) -> Self {
+        if failed {
+            Self::Deferred
+        } else if custody {
+            Self::Advanced
+        } else {
+            match continuation {
+                TransferContinuation::None => Self::Deferred,
+                TransferContinuation::More => Self::More,
+                TransferContinuation::Limited => Self::Limited,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferOutcome {
+    Held,
+    More,
+    Limited,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferContinuation {
+    None,
+    More,
+    Limited,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1001,7 +1045,22 @@ impl Node {
             .pending_transactions()
             .iter()
             .any(|pending| pending.id() == transaction.id());
-        let id = store.begin(transaction)?;
+        use crate::transport::diagnostics;
+        let tracks_message = matches!(
+            transaction.body(),
+            DeliveryTransaction::Outgoing { .. }
+                | DeliveryTransaction::OutgoingManifest { .. }
+                | DeliveryTransaction::ChannelOutgoing { .. }
+        );
+        let result = store.begin(transaction);
+        if tracks_message {
+            diagnostics::record_message(|metrics| match &result {
+                Ok(_) if !already_pending => metrics.accepted = metrics.accepted.saturating_add(1),
+                Err(_) => metrics.rejected = metrics.rejected.saturating_add(1),
+                _ => {}
+            });
+        }
+        let id = result?;
         if !already_pending {
             self.note_delivery_demand();
         }
@@ -1048,7 +1107,13 @@ impl Node {
         {
             return Err(LogError::CorruptFile("invalid manifest device pair".into()));
         }
+        if !self.personal_peer_allowed(&peer, Some(proof)) {
+            return Err(LogError::AdmissionRejected(
+                "personal communication denied".into(),
+            ));
+        }
         if self.files.lock().expect("files lock").processed(event.id)? {
+            crate::transport::diagnostics::note_duplicate_receive();
             return Ok(());
         }
         let manifest = super::files::validated_manifest(&received.plaintext)
@@ -1108,16 +1173,16 @@ impl Node {
                 // The former collector sorted by sequence. Exact author/sequence
                 // seeks retain that rule, and missing or mixed-author slots fail.
                 for index in 0..count {
-                    let header = log
+                    let chunk = log
                         .repository()?
-                        .authored_header(&manifest.file_conv(), first.author, index + 1)?
+                        .authored_file_chunk(
+                            &manifest.file_conv(),
+                            first.author,
+                            index as u32,
+                            4 * 1024 * 1024,
+                        )?
                         .ok_or_else(|| {
                             LogError::CorruptFile("conflicting file chunk conversation".into())
-                        })?;
-                    let chunk = log
-                        .get_bounded(&header.id, 4 * 1024 * 1024)?
-                        .ok_or_else(|| {
-                            LogError::CorruptFile("selected file chunk disappeared".into())
                         })?;
                     if !chain.accept(&chunk)
                         || crate::file::open_chunk_for(&manifest, index as u32, &chunk.ciphertext)
@@ -1369,7 +1434,11 @@ impl Node {
             .expect("received mutex")
             .processed(event.id)?
         {
+            crate::transport::diagnostics::note_duplicate_receive();
             return Ok(Some(()));
+        }
+        if !sibling && !self.personal_peer_allowed(&peer, proof) {
+            return Ok(None);
         }
         if sibling && !self.device_sync_policy().history {
             return Ok(None);
@@ -1931,6 +2000,15 @@ impl Node {
         Ok(())
     }
 
+    /// Read existing direct outbox state without waiting on an active writer.
+    pub fn diagnostic_delivery_backlog(&self) -> Option<(usize, Option<u64>)> {
+        let (count, oldest) = self.delivery.try_lock().ok()?.diagnostic_backlog();
+        Some((
+            count,
+            oldest.and_then(|time| super::node::now_millis().checked_sub(time)),
+        ))
+    }
+
     /// Current profile's local durable acceptance / authenticated delivery state.
     pub fn delivery_status(&self, id: EventId) -> Option<DeliveryStatus> {
         self.delivery
@@ -2124,6 +2202,8 @@ impl Node {
         {
             return;
         }
+        let first_delivery =
+            store.status(authenticated.logical_id()) == Some(DeliveryStatus::Awaiting);
         if store
             .mark_delivered_for(
                 authenticated.logical_id(),
@@ -2131,6 +2211,11 @@ impl Node {
             )
             .is_ok()
         {
+            if first_delivery {
+                crate::transport::diagnostics::record_message(|metrics| {
+                    metrics.delivered(super::node::now_millis().checked_sub(message.wall_clock));
+                });
+            }
             self.retire_retained_delivery_control(event.id);
             self.delivery_observations
                 .lock()
@@ -2283,8 +2368,10 @@ impl Node {
             destination,
             conversation,
             super::session_pool::AuthenticationAdmission::Backpressure,
+            false,
         )
         .await
+        .0 == TransferOutcome::Held
     }
 
     async fn transfer_delivery_destination_with_admission(
@@ -2293,7 +2380,8 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
         admission: super::session_pool::AuthenticationAdmission,
-    ) -> bool {
+        follow_receipts: bool,
+    ) -> (TransferOutcome, bool) {
         for fresh in [false, true] {
             let started = std::time::Instant::now();
             let dial = if fresh {
@@ -2305,7 +2393,13 @@ impl Node {
                     .await
             };
             let Ok((mut channel, reused)) = dial else {
-                return false;
+                #[cfg(test)]
+                if let Err(error) = &dial {
+                    self.trace_account_client(&peer.public, || {
+                        format!("delivery_range_failed stage=dial error={error}")
+                    });
+                }
+                return (TransferOutcome::Failed, false);
             };
             if !self.delivery_destination_allowed(destination)
                 || channel.peer_announcement().is_some_and(|p| {
@@ -2317,7 +2411,7 @@ impl Node {
                     .expect("delivery lock not poisoned")
                     .contains_work_event(destination.event.id)
             {
-                return false;
+                return (TransferOutcome::Failed, false);
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
@@ -2328,11 +2422,28 @@ impl Node {
                     .request_reception_scope(&store, &channel)
                     .ok_or(SessionError::UnexpectedMessage)?;
                 let result =
-                    super::session::request_round_paged(&mut channel, &store, conversation).await;
+                    super::session::request_sync_turn_paged(&mut channel, &store, conversation)
+                        .await;
                 self.dispatch_received_sync_work(&store);
-                result?;
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || match &result {
+                    Ok(outcome) => format!(
+                        "delivery_range_done message={} complete={} limited={} applied={}",
+                        conversation == destination.event.conversation_id,
+                        outcome.complete,
+                        outcome.limited,
+                        outcome.applied
+                    ),
+                    Err(error) => format!("delivery_range_failed stage=sync error={error}"),
+                });
+                let outcome = result?;
+                // This framed range turn has actually completed. Publish its
+                // measured cost before the separate Have RPC, so the existing
+                // adaptive owner can use its existing deadline ceiling in time.
+                self.observe_control_exchange(&channel, started);
+                let (complete, limited) = (outcome.complete, outcome.limited);
                 if conversation != destination.event.conversation_id {
-                    return Ok(false);
+                    return Ok((false, complete, limited));
                 }
                 super::session::request_durable_have(
                     &mut channel,
@@ -2340,21 +2451,101 @@ impl Node {
                     destination.event.id,
                 )
                 .await
+                .map(|held| (held, complete, limited))
             }
             .await;
             match exchange {
-                Ok(held) => {
+                Ok((held, complete, limited)) => {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!(
+                            "delivery_range_have message={} held={held} complete={complete} limited={limited}",
+                            conversation == destination.event.conversation_id
+                        )
+                    });
                     self.observe_control_exchange(&channel, started);
-                    if held || conversation != destination.event.conversation_id {
+                    let held = held && self.delivery_destination_allowed(destination);
+                    if held && follow_receipts {
+                        self.emit_new_messages(conversation);
+                    }
+                    // This authenticated original stream owns its follow-up.
+                    // A separate early receipt probe can remain blocked on a
+                    // different snapshot or connection; it is not a prerequisite.
+                    let follow_receipt = held
+                        && follow_receipts
+                        && self.delivery_destination_allowed(destination)
+                        && self
+                            .delivery
+                            .lock()
+                            .expect("delivery lock not poisoned")
+                            .contains_work_event(destination.event.id);
+                    if follow_receipt {
+                        // Keep the exact authenticated stream after positive Have.
+                        // The enclosing attempt still owns its original deadline.
+                        let control = super::delivery_receipt::delivery_conversation_id(
+                            &self.identity.public(),
+                            &destination.device,
+                        );
+                        let store = self.sync_store(channel.peer_identity());
+                        let Some(_reception) = self.request_reception_scope(&store, &channel)
+                        else {
+                            return (TransferOutcome::Held, false);
+                        };
+                        for tick in 0..4 {
+                            let result = super::session::request_sync_turn_paged(
+                                &mut channel,
+                                &store,
+                                control,
+                            )
+                            .await;
+                            #[cfg(test)]
+                            self.trace_account_client(&peer.public, || match &result {
+                                Ok(outcome) => format!(
+                                    "delivery_receipt_followup complete={} limited={} applied={}",
+                                    outcome.complete, outcome.limited, outcome.applied
+                                ),
+                                Err(error) => format!("delivery_receipt_followup error={error}"),
+                            });
+                            self.dispatch_received_sync_work(&store);
+                            self.emit_new_messages(control);
+                            match result {
+                                Err(_) => return (TransferOutcome::Held, false),
+                                Ok(outcome)
+                                    if !outcome.complete
+                                        && !outcome.limited
+                                        && tick + 1 < 4
+                                        && self.delivery_destination_allowed(destination) =>
+                                {
+                                    // Preparation and comparison are separate bounded
+                                    // turns. Preserve the authenticated stream and its
+                                    // original outer deadline while work remains.
+                                    tokio::task::yield_now().await;
+                                }
+                                Ok(_) => break,
+                            }
+                        }
+                    }
+                    if held || !complete || conversation != destination.event.conversation_id {
                         self.recycle_sync_channel(channel);
                     }
-                    return held && self.delivery_destination_allowed(destination);
+                    let outcome = if !self.delivery_destination_allowed(destination) {
+                        TransferOutcome::Failed
+                    } else if held {
+                        TransferOutcome::Held
+                    } else if limited {
+                        TransferOutcome::Limited
+                    } else if !complete {
+                        TransferOutcome::More
+                    } else {
+                        TransferOutcome::Failed
+                    };
+                    return (outcome, follow_receipt);
                 }
                 Err(error) if reused && super::session_pool::retryable_sync_error(&error) => {}
-                Err(_) => return false,
+                Err(_) => return (TransferOutcome::Failed, false),
             }
         }
-        false
+        (TransferOutcome::Failed, false)
     }
 
     pub(in crate::node) async fn replicate_delivery_destination(
@@ -2380,6 +2571,10 @@ impl Node {
         use futures_util::StreamExt;
         let scope = format!("upload:{}", destination.device.user_id());
         let candidates = self.relay_candidate_batch(&scope, candidates);
+        let generation = self
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
         let attempts = futures_util::stream::iter(candidates)
             .map(|po| async move {
                 if po.public == self.identity.public()
@@ -2388,7 +2583,7 @@ impl Node {
                 {
                     return false;
                 }
-                let success = self
+                let result = self
                     .adaptive_control_timeout(&po.public, async {
                         for fresh in [false, true] {
                             let started = std::time::Instant::now();
@@ -2405,7 +2600,7 @@ impl Node {
                                     .await
                             };
                             let Ok((mut channel, reused)) = dial else {
-                                return false;
+                                return Ok(false);
                             };
                             if !self.delivery_destination_allowed(destination)
                                 || !self.relay_send_allowed(&po.public)
@@ -2418,60 +2613,40 @@ impl Node {
                                     .expect("delivery lock not poisoned")
                                     .contains_work_event(destination.event.id)
                             {
-                                return false;
+                                return Ok(false);
                             }
-                            let exchange = async {
-                                let uploaded = self
-                                    .opaque_history_publication_round_for(
-                                        &mut channel,
-                                        &destination.device,
-                                        destination.event.conversation_id,
-                                        Some(destination.event.id),
-                                    )
-                                    .await?;
-                                let Some((_, outer_id)) = uploaded
-                                    .iter()
-                                    .find(|(inner_id, _)| *inner_id == destination.event.id)
-                                else {
-                                    return Ok(false);
-                                };
-                                let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                                    &self.identity,
-                                    &destination.device,
-                                    &po.public,
-                                ) else {
-                                    return Ok(false);
-                                };
-                                super::session::request_durable_have(
+                            let exchange = self
+                                .confirm_history_relay_custody(
                                     &mut channel,
-                                    mailbox.id(),
-                                    *outer_id,
+                                    &destination.device,
+                                    destination.event.conversation_id,
+                                    destination.event.id,
                                 )
-                                .await
-                            }
-                            .await;
+                                .await;
                             match exchange {
                                 Ok(held) => {
                                     self.observe_control_exchange(&channel, started);
                                     if held {
                                         self.recycle_sync_channel(channel);
                                     }
-                                    return held
+                                    return Ok(held
                                         && self.delivery_destination_allowed(destination)
-                                        && self.relay_send_allowed(&po.public);
+                                        && self.relay_send_allowed(&po.public));
                                 }
                                 Err(error)
                                     if reused
                                         && super::session_pool::retryable_sync_error(&error) => {}
-                                Err(_) => return false,
+                                Err(error) => return Err(error),
                             }
                         }
-                        false
+                        Ok(false)
                     })
                     .await
-                    .unwrap_or(false);
-                self.record_relay_attempt(&po.public, success);
-                success
+                    .unwrap_or(Ok(false));
+                if matches!(result, Ok(true)) {
+                    self.observe_exact_relay_custody(destination, &po.public, generation);
+                }
+                self.record_relay_attempt_result(&po.public, result.as_ref().copied())
             })
             .buffer_unordered(2);
         tokio::pin!(attempts);
@@ -2547,6 +2722,24 @@ impl Node {
         }
     }
 
+    /// A local pause preserves the relay's current health and leaves retry
+    /// pacing to the operation that owns the interrupted exchange.
+    pub(super) fn record_relay_attempt_result(
+        &self,
+        relay: &PublicIdentity,
+        result: Result<bool, &SessionError>,
+    ) -> bool {
+        if matches!(
+            result,
+            Err(SessionError::ResourceUnavailable | SessionError::Store(LogError::StaleCursor))
+        ) {
+            return false;
+        }
+        let success = result.unwrap_or(false);
+        self.record_relay_attempt(relay, success);
+        success
+    }
+
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
         let roster = self.roster.lock().expect("roster mutex not poisoned");
         let mut relays = std::collections::BTreeSet::new();
@@ -2588,7 +2781,8 @@ impl Node {
     }
 
     fn control_budget(&self, peer: &PublicIdentity) -> std::time::Duration {
-        self.routing_peer(&peer.user_id())
+        let observed = self
+            .routing_peer(&peer.user_id())
             .filter(|p| p.public == *peer)
             .map_or(CONTROL_EXCHANGE_TIMEOUT, |record| {
                 record
@@ -2603,7 +2797,16 @@ impl Node {
                     ))
                     .max()
                     .unwrap_or(CONTROL_EXCHANGE_TIMEOUT)
-            })
+            });
+        let preferred = self
+            .preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .get(&peer.user_id())
+            .copied();
+        preferred.map_or(observed, |address| {
+            observed.max(self.sessions.control_timeout(peer, address))
+        })
     }
 
     pub(super) async fn adaptive_control_timeout<T>(
@@ -2661,6 +2864,9 @@ impl Node {
             // A completed-but-unjoined old task may have moved its observation
             // token out of its Drop guard. Remove only that exact destination.
             if let ControlWork::Destination(event) = key {
+                crate::transport::diagnostics::record_message(|metrics| {
+                    metrics.route_restarts = metrics.route_restarts.saturating_add(1);
+                });
                 self.delivery_observations
                     .lock()
                     .expect("delivery observations lock not poisoned")
@@ -2677,6 +2883,7 @@ impl Node {
         let _observation_scope = ObservationScope(self.clone());
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut idle_repair = None;
         let mut destination_cursor = None;
         let mut receipt_cursor = None;
         let mut peer_cursor = None;
@@ -2692,6 +2899,8 @@ impl Node {
         // Custody qualifies one exact destination, whereas failures pace the
         // peer lane. One held event must not park another queued event.
         let mut quiet_destinations = super::delivery_retry::RetrySchedule::default();
+        // Exact-event receipt polls cannot park another message on the peer lane.
+        let mut receipt_polls = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         let mut roster_changes = self.subscribe_roster_changes();
         let mut roster_open = true;
@@ -2706,10 +2915,18 @@ impl Node {
                 },
                 changed = roster_changes.changed(), if roster_open => {
                     if changed.is_ok() {
-                        if !file_scheduler.refresh_held(&self, std::time::Instant::now()) { continue; }
+                        if !file_scheduler.refresh_held(&self, std::time::Instant::now()) && idle_repair.is_none() {
+                            continue;
+                        }
                     } else { roster_open = false; continue; }
                 },
-                _ = interval.tick() => {},
+                _ = interval.tick(), if idle_repair.is_none() => {},
+                _ = async {
+                    match idle_repair {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {},
                 _ = self.delivery_notify.notified() => {},
                 _ = network.changed() => {
                     self.clear_delivery_observations();
@@ -2727,38 +2944,66 @@ impl Node {
                     active.clear();
                     retries.clear();
                     quiet_destinations.clear();
+                    receipt_polls.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
-                    continue;
+                    if idle_repair.is_none() {
+                        continue;
+                    }
                 },
                 result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
+                        Some(Ok((task, (key, persistence_failed, progress, observation, fresh_hold)))) => {
                             if control_owners.finished(task).as_ref() == Some(&key)
                                 && let Some(routes) = active.remove(&key) {
                                 if matches!(key, ControlWork::Pull(_)) {
                                     let reason = match progress {
                                         Reconciliation::Advanced => super::work_observation::reason::PULL_ADVANCED,
                                         Reconciliation::Quiet => super::work_observation::reason::PULL_QUIET,
+                                        Reconciliation::Limited => super::work_observation::reason::PULL_DEFERRED,
+                                        Reconciliation::More => super::work_observation::reason::PULL_DEFERRED,
                                         Reconciliation::Deferred => super::work_observation::reason::PULL_DEFERRED,
                                     };
                                     self.observe_mailbox_work(reason, None);
                                 }
                                 let now = std::time::Instant::now();
-                                let input = routes.retry_routes();
-                                if let (Reconciliation::Quiet, ControlWork::Destination(event)) = (progress, &key) {
-                                    quiet_destinations.settled(
-                                        (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub),
-                                        input.clone(), QUIET_REPAIR_INTERVAL, now,
-                                    );
-                                    // Release the peer after its ordinary short
-                                    // pacing turn; only this event owns quietness.
-                                    retries.settled(key.retry_key(&routes.peer), input, Duration::from_millis(500), now);
+                                // A fresh authenticated Have can finish after discovery
+                                // presence expires or unrelated demand is queued. Capture
+                                // those scheduling inputs at completion, while rejecting
+                                // any changed endpoint, relay or authorization generation.
+                                let current_routes = self.control_routes(&routes.peer);
+                                let same_route = current_routes.endpoints == routes.endpoints
+                                    && current_routes.relays == routes.relays
+                                    && current_routes.policy_generation == routes.policy_generation;
+                                let input = if fresh_hold && same_route {
+                                    current_routes.retry_routes()
+                                } else { routes.retry_routes() };
+                                if let ControlWork::Destination(event) = &key {
+                                    let hint = (*event, routes.peer.ed25519_pub, routes.peer.x25519_pub);
+                                    if fresh_hold && same_route {
+                                        receipt_polls.forget(&hint);
+                                        quiet_destinations.settled(hint, input.clone(), QUIET_REPAIR_INTERVAL, now);
+                                    }
+                                    if progress == Reconciliation::Quiet {
+                                        let delay = quiet_destinations.remaining(&hint, &input, now)
+                                            .unwrap_or(Duration::from_millis(500));
+                                        receipt_polls.settled(hint, input.clone(), delay, now);
+                                        progress.schedule_destination_peer(&mut retries, key.retry_key(&routes.peer), input, now);
+                                    } else {
+                                        progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
+                                    }
                                 } else {
                                     progress.schedule(&mut retries, key.retry_key(&routes.peer), input, now);
                                 }
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
+                                if progress == Reconciliation::More {
+                                    // A completed bounded exchange retained work. Return
+                                    // through normal cursor/capacity admission promptly;
+                                    // failures and sparse polls keep their own pacing.
+                                    tokio::task::yield_now().await;
+                                    self.delivery_notify.notify_one();
+                                }
                             }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
@@ -2778,6 +3023,9 @@ impl Node {
                     continue;
                 },
             }
+            // Only a successful empty turn may park. Errors fall back to
+            // the existing active pace and preserve repair progress.
+            idle_repair = None;
             // A new route for an active peer/eligible relay must not wait behind
             // an exchange still blocked on its old endpoint. Refresh timestamps
             // and unrelated peers do not invalidate the bounded control batch.
@@ -2849,6 +3097,7 @@ impl Node {
                     continue;
                 }
             };
+            let has_durable_work = destination.is_some() || receipt.is_some() || !files.is_empty();
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let key = ControlWork::Destination(destination.event_id);
@@ -2869,123 +3118,143 @@ impl Node {
                         &input,
                         std::time::Instant::now(),
                     )
-                    && quiet_destinations.ready(
-                        &(
-                            destination.event_id,
-                            destination.device.ed25519_pub,
-                            destination.device.x25519_pub,
-                        ),
-                        &input,
-                        std::time::Instant::now(),
-                    )
                 {
-                    let Some(work) = self.runtime_work.admit() else {
-                        return;
-                    };
-                    let reading = self.clone();
-                    let payload = work
-                        .spawn_blocking(move || {
-                            let event = reading
-                                .log
-                                .lock()
-                                .expect("log lock not poisoned")
-                                .get(&destination.event_id)?;
-                            Ok::<_, crate::eventlog::LogError>(event.map(|event| {
-                                DeliveryDestination {
-                                    device: destination.device,
-                                    account: destination.account,
-                                    event,
-                                    receipt_eligible: destination.receipt_eligible,
+                    let hint = (
+                        destination.event_id,
+                        destination.device.ed25519_pub,
+                        destination.device.x25519_pub,
+                    );
+                    let held = quiet_destinations
+                        .remaining(&hint, &input, std::time::Instant::now())
+                        .is_some();
+                    if held
+                        && destination.receipt_eligible
+                        && receipt_polls.ready(&hint, &input, std::time::Instant::now())
+                    {
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
+                        };
+                        let node = self.clone();
+                        active.insert(key.clone(), routes);
+                        let owner = key.clone();
+                        let task = controls.spawn(work.track(async move {
+                            let progress = node.collect_destination_receipt(id, &destination).await;
+                            (key, false, progress, None, false)
+                        }));
+                        control_owners.insert(owner, task);
+                    } else if !held {
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
+                        };
+                        let reading = self.clone();
+                        let payload = work
+                            .spawn_blocking(move || {
+                                let event = reading
+                                    .log
+                                    .lock()
+                                    .expect("log lock not poisoned")
+                                    .get(&destination.event_id)?;
+                                Ok::<_, crate::eventlog::LogError>(event.map(|event| {
+                                    DeliveryDestination {
+                                        device: destination.device,
+                                        account: destination.account,
+                                        event,
+                                        receipt_eligible: destination.receipt_eligible,
+                                    }
+                                }))
+                            })
+                            .await;
+                        let destination = match payload {
+                            Ok(payload) => match payload.into_inner() {
+                                Ok(Some(destination)) => destination,
+                                Ok(None) => continue,
+                                Err(error) => {
+                                    log::warn!("delivery payload read deferred: {error}");
+                                    diagnostic.warn_if_due();
+                                    continue;
                                 }
-                            }))
-                        })
-                        .await;
-                    let destination = match payload {
-                        Ok(payload) => match payload.into_inner() {
-                            Ok(Some(destination)) => destination,
-                            Ok(None) => continue,
+                            },
                             Err(error) => {
-                                log::warn!("delivery payload read deferred: {error}");
+                                log::warn!("delivery payload worker failed: {error}");
                                 diagnostic.warn_if_due();
                                 continue;
                             }
-                        },
-                        Err(error) => {
-                            log::warn!("delivery payload worker failed: {error}");
-                            diagnostic.warn_if_due();
-                            continue;
-                        }
-                    };
-                    let Some(work) = self.runtime_work.admit() else {
-                        return;
-                    };
-                    // This attempt supersedes any earlier quiet observation,
-                    // including when it later fails or is cancelled. Returning
-                    // to an older route input must not revive the old hint.
-                    quiet_destinations.forget(&(
-                        destination.event.id,
-                        destination.device.ed25519_pub,
-                        destination.device.x25519_pub,
-                    ));
-                    let node = self.clone();
-                    // Capture the exact admitted attempt before spawning. A
-                    // cancelled task may never be polled; it still owns cleanup,
-                    // and cannot publish a new hint after its parent is dropped.
-                    let attempt = ObservationAttempt {
-                        node: node.clone(),
-                        token: node.begin_delivery_observation(id, &destination),
-                    };
-                    active.insert(key.clone(), routes);
-                    let owner = key.clone();
-                    let task = controls.spawn(work.track(async move {
-                        // Move the entire Drop owner into the future. Capturing
-                        // only its Copy token would drop the guard at admission.
-                        let mut attempt = attempt;
-                        let live = node
-                            .delivery
-                            .lock()
-                            .expect("delivery lock not poisoned")
-                            .contains_destination(id, destination.event.id);
-                        let (progress, reason) = if live {
-                            node.retry_one_destination_with_reason(
-                                &destination,
-                                DeliveryAttemptContext::RetainedRecovery,
-                            )
-                            .await
-                        } else {
-                            (false, None)
                         };
-                        let (failed, advanced) = if progress {
-                            let mut store =
-                                node.delivery.lock().expect("delivery lock not poisoned");
-                            let failed = store.completed_work(id).is_some()
-                                && store.retire_destination(id, destination.event.id).is_err();
-                            // An unchanged positive remote-have proof is storage
-                            // evidence, not new queue progress. Keep awaiting the
-                            // recipient's receipt with the existing bounded backoff.
-                            let advanced =
-                                !failed && !store.contains_destination(id, destination.event.id);
-                            (failed, advanced)
-                        } else {
-                            (false, false)
+                        let Some(work) = self.runtime_work.admit() else {
+                            return;
                         };
-                        let reconciliation = if failed {
-                            Reconciliation::Deferred
-                        } else if advanced {
-                            Reconciliation::Advanced
-                        } else if progress {
-                            // Positive custody with an unchanged queue is an
-                            // observed success, not a failed delivery attempt.
-                            // Keep Awaiting until the recipient's real receipt;
-                            // new demand and changed routes retain their wakes.
-                            Reconciliation::Quiet
-                        } else {
-                            Reconciliation::Deferred
+                        // This attempt supersedes any earlier quiet observation,
+                        // including when it later fails or is cancelled. Returning
+                        // to an older route input must not revive the old hint.
+                        quiet_destinations.forget(&(
+                            destination.event.id,
+                            destination.device.ed25519_pub,
+                            destination.device.x25519_pub,
+                        ));
+                        let node = self.clone();
+                        // Capture the exact admitted attempt before spawning. A
+                        // cancelled task may never be polled; it still owns cleanup,
+                        // and cannot publish a new hint after its parent is dropped.
+                        let attempt = ObservationAttempt {
+                            node: node.clone(),
+                            token: node.begin_delivery_observation(id, &destination),
                         };
-                        let observation = attempt.token.take().map(|token| (token, reason));
-                        (key, failed, reconciliation, observation)
-                    }));
-                    control_owners.insert(owner, task);
+                        active.insert(key.clone(), routes);
+                        let owner = key.clone();
+                        let task = controls.spawn(work.track(async move {
+                            // Move the entire Drop owner into the future. Capturing
+                            // only its Copy token would drop the guard at admission.
+                            let mut attempt = attempt;
+                            let live = node
+                                .delivery
+                                .lock()
+                                .expect("delivery lock not poisoned")
+                                .contains_destination(id, destination.event.id);
+                            let (progress, reason, continuation) = if live {
+                                node.retry_one_destination_outcome(
+                                    &destination,
+                                    DeliveryAttemptContext::RetainedRecovery,
+                                )
+                                .await
+                            } else {
+                                (false, None, TransferContinuation::None)
+                            };
+                            let (failed, advanced) = if progress {
+                                let mut store =
+                                    node.delivery.lock().expect("delivery lock not poisoned");
+                                let failed = store.completed_work(id).is_some()
+                                    && store.retire_destination(id, destination.event.id).is_err();
+                                // An unchanged positive remote-have proof is storage
+                                // evidence, not new queue progress. Keep awaiting the
+                                // recipient's receipt with the existing bounded backoff.
+                                let advanced = !failed
+                                    && !store.contains_destination(id, destination.event.id);
+                                (failed, advanced)
+                            } else {
+                                (false, false)
+                            };
+                            let reconciliation = if failed {
+                                Reconciliation::Deferred
+                            } else if advanced {
+                                Reconciliation::Advanced
+                            } else if continuation == TransferContinuation::More {
+                                Reconciliation::More
+                            } else if continuation == TransferContinuation::Limited {
+                                Reconciliation::Limited
+                            } else if progress {
+                                // Positive custody with an unchanged queue is an
+                                // observed success, not a failed delivery attempt.
+                                // Keep Awaiting until the recipient's real receipt;
+                                // new demand and changed routes retain their wakes.
+                                Reconciliation::Quiet
+                            } else {
+                                Reconciliation::Deferred
+                            };
+                            let observation = attempt.token.take().map(|token| (token, reason));
+                            (key, failed, reconciliation, observation, progress)
+                        }));
+                        control_owners.insert(owner, task);
+                    }
                 }
             }
             if let Some(receipt) = receipt {
@@ -3009,8 +3278,8 @@ impl Node {
                     active.insert(key.clone(), routes);
                     let owner = key.clone();
                     let task = controls.spawn(work.track(async move {
-                        let progress = node
-                            .retry_one_destination(
+                        let (progress, _, continuation) = node
+                            .retry_one_destination_outcome(
                                 &receipt.destination,
                                 DeliveryAttemptContext::ReceiptRecovery,
                             )
@@ -3025,8 +3294,9 @@ impl Node {
                         (
                             key,
                             failed,
-                            Reconciliation::from_progress(progress && !failed),
+                            Reconciliation::receipt_result(progress, failed, continuation),
                             None,
+                            false,
                         )
                     }));
                     control_owners.insert(owner, task);
@@ -3036,7 +3306,21 @@ impl Node {
             file_scheduler.advance(&self);
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
-            let peer = if active.keys().any(|key| matches!(key, ControlWork::Pull(_))) {
+            let explicitly_verified = !self
+                .verified_dm_pull_peers
+                .lock()
+                .expect("verified DM pull mutex not poisoned")
+                .is_empty();
+            let has_pull_demand = explicitly_verified
+                || (self.bridge_directory_allowed()
+                    && !self
+                        .bridge_dm_pull_peers
+                        .lock()
+                        .expect("bridge peers mutex not poisoned")
+                        .is_empty());
+            let peer = if !has_pull_demand
+                || active.keys().any(|key| matches!(key, ControlWork::Pull(_)))
+            {
                 None
             } else {
                 let state = self
@@ -3053,6 +3337,20 @@ impl Node {
                         .next_historical_after(peer_cursor.as_deref())
                 }
             };
+            // Preserve the circular reconciliation scan and pacing whenever
+            // a verified-device or bridge policy can authorize proactive pulls.
+            // Check real worker ownership before parking on an empty snapshot.
+            if !has_durable_work
+                && controls.is_empty()
+                && file_scheduler.workers.is_empty()
+                && file_scheduler.transfers.is_empty()
+                && !has_pull_demand
+            {
+                // Sparse repair covers a missed local notification or an
+                // externally replaced journal. Accepted work and route
+                // changes still wake the existing owner immediately.
+                idle_repair = Some(tokio::time::Instant::now() + Duration::from_secs(300));
+            }
             if let Some(peer) = peer {
                 peer_cursor = Some(peer.user_id.clone());
                 if peer.post_office
@@ -3080,7 +3378,7 @@ impl Node {
                     let owner = key.clone();
                     let task = controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
-                        (key, false, progress, None)
+                        (key, false, progress, None, false)
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -3144,7 +3442,7 @@ impl Node {
         }
         let peers = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.post_office_candidates(&roster)
+            self.post_office_candidates_for(&roster, &proof.public())
         } else {
             self.routing_peer(&proof.public().user_id())
                 .into_iter()
@@ -3190,7 +3488,7 @@ impl Node {
                     {
                         return Err(SessionError::UnexpectedMessage);
                     }
-                    let (advanced, dispatched) = if relay {
+                    let (advanced, dispatched, complete, limited) = if relay {
                         // Upload confirmations are not incoming progress. A bounded
                         // scalar source observation also sees accepted relay controls.
                         let before = self
@@ -3207,16 +3505,25 @@ impl Node {
                             .expect("log lock")
                             .repository()?
                             .source_revision()?;
-                        (before != after, false)
+                        (before != after, false, true, false)
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
                         let _reception = self
                             .request_reception_scope(&store, &channel)
                             .ok_or(SessionError::UnexpectedMessage)?;
                         let result =
-                            super::session::request_round_paged(&mut channel, &store, conv).await;
+                            super::session::request_sync_turn_paged(&mut channel, &store, conv)
+                                .await;
                         let dispatched = self.dispatch_received_sync_work(&store);
-                        (result?.applied > 0, dispatched)
+                        {
+                            let outcome = result?;
+                            (
+                                outcome.report.applied > 0,
+                                dispatched,
+                                outcome.complete,
+                                outcome.limited,
+                            )
+                        }
                     };
                     // A quiet success still retires the framed exchange and retries
                     // local projections. It never certifies new data or custody.
@@ -3226,15 +3533,22 @@ impl Node {
                         self.emit_new_messages(conv);
                         self.process_file_events(conv);
                     }
-                    Ok::<_, SessionError>(advanced)
+                    Ok::<_, SessionError>((advanced, complete, limited))
                 })
                 .await;
             if relay {
-                self.record_relay_attempt(&peer.public, matches!(result, Some(Ok(_))));
+                self.record_relay_attempt_result(
+                    &peer.public,
+                    result
+                        .as_ref()
+                        .map_or(Ok(false), |outcome| outcome.as_ref().map(|_| true)),
+                );
             }
             completed = completed.combine(match result {
-                Some(Ok(true)) => Reconciliation::Advanced,
-                Some(Ok(false)) => Reconciliation::Quiet,
+                Some(Ok((true, _, _))) => Reconciliation::Advanced,
+                Some(Ok((false, false, true))) => Reconciliation::Limited,
+                Some(Ok((false, false, false))) => Reconciliation::More,
+                Some(Ok((false, true, _))) => Reconciliation::Quiet,
                 _ => Reconciliation::Deferred,
             });
         }
@@ -3256,8 +3570,147 @@ impl Node {
         destination: &DeliveryDestination,
         context: DeliveryAttemptContext,
     ) -> (bool, Option<DeliveryRecoveryReason>) {
+        let (held, reason, _) = self
+            .retry_one_destination_outcome(destination, context)
+            .await;
+        (held, reason)
+    }
+
+    /// A fresh storage hint changes scheduling only. A real signed receipt is
+    /// still required to retire the exact pending destination.
+    async fn collect_destination_receipt(
+        self: &Arc<Self>,
+        logical: EventId,
+        destination: &super::delivery_store::DeliveryReference,
+    ) -> Reconciliation {
+        let current = || {
+            !self.delivery_suspended.load(Ordering::Acquire)
+                && self.known_account_allowed(&destination.device)
+                && self
+                    .historical_author(&destination.device.ed25519_pub)
+                    .is_some_and(|proof| {
+                        proof.public() == destination.device
+                            && (destination.account.is_none()
+                                || proof.account_id() == destination.account)
+                    })
+                && self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_destination(logical, destination.event_id)
+        };
+        if !current() {
+            return Reconciliation::Deferred;
+        }
+        let Some(peer) = self
+            .routing_peer(&destination.device.user_id())
+            .filter(|peer| {
+                peer.public == destination.device
+                    && (destination.account.is_none() || peer.account_id == destination.account)
+            })
+        else {
+            return Reconciliation::Deferred;
+        };
+        let control = super::delivery_receipt::delivery_conversation_id(
+            &self.identity.public(),
+            &destination.device,
+        );
+        let exchange = self.adaptive_control_timeout(&peer.public, async {
+            for fresh in [false, true] {
+                let started = std::time::Instant::now();
+                let admission = super::session_pool::AuthenticationAdmission::RouteProgress;
+                let dial = if fresh {
+                    self.privacy_dial_with_admission(peer.addr, &peer.public, admission)
+                        .await
+                        .map(|channel| (channel, false))
+                } else {
+                    self.privacy_sync_dial_with_admission(peer.addr, &peer.public, admission)
+                        .await
+                };
+                let (mut channel, reused) = dial.map_err(SessionError::from)?;
+                if !current()
+                    || channel.peer_announcement().is_some_and(|proof| {
+                        destination.account.is_some() && proof.account_id() != destination.account
+                    })
+                {
+                    return Err(SessionError::UnexpectedMessage);
+                }
+                // Receipt publication has its own owner. This collector only
+                // pulls the pairwise control scope; it never reopens DM history.
+                let store = self.pull_sync_store(channel.peer_identity());
+                let _reception = self
+                    .request_reception_scope(&store, &channel)
+                    .ok_or(SessionError::UnexpectedMessage)?;
+                let received = store.lock().expect("sync store lock").reception_notify();
+                for tick in 0..4 {
+                let result = {
+                    let turn =
+                        super::session::request_sync_turn_paged(&mut channel, &store, control);
+                    tokio::pin!(turn);
+                    loop {
+                        tokio::select! {
+                            result = &mut turn => break result,
+                            _ = received.notified() => { self.dispatch_received_sync_work(&store); }
+                        }
+                    }
+                };
+                self.dispatch_received_sync_work(&store);
+                match result {
+                    Ok(outcome) => {
+                        self.observe_control_exchange(&channel, started);
+                        if current() && !outcome.complete && !outcome.limited && tick + 1 < 4 {
+                            // This clean four-turn receipt exchange still has bounded
+                            // work. Retry pacing belongs to the scheduling boundary,
+                            // not between its preparation and comparison turns.
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        self.recycle_sync_channel(channel);
+                        return Ok(if !current() {
+                            Reconciliation::Advanced
+                        } else if outcome.limited {
+                            Reconciliation::Limited
+                        } else if !outcome.complete {
+                            Reconciliation::More
+                        } else {
+                            Reconciliation::Quiet
+                        });
+                    }
+                    Err(error) if reused && super::session_pool::retryable_sync_error(&error) => break,
+                    Err(error) => {
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("receipt_collect_failed error={error}")
+                        });
+                        return Err(error);
+                    }
+                }
+                }
+            }
+            Err(SessionError::UnexpectedMessage)
+        });
+        tokio::pin!(exchange);
+        loop {
+            let changed = self.delivery_status_notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !current() {
+                return Reconciliation::Advanced;
+            }
+            tokio::select! {
+                result = &mut exchange => return result.and_then(Result::ok).unwrap_or(Reconciliation::Deferred),
+                _ = &mut changed => {},
+            }
+        }
+    }
+
+    async fn retry_one_destination_outcome(
+        self: &Arc<Self>,
+        destination: &DeliveryDestination,
+        context: DeliveryAttemptContext,
+    ) -> (bool, Option<DeliveryRecoveryReason>, TransferContinuation) {
         if !self.delivery_destination_allowed(destination) {
-            return (false, None);
+            return (false, None, TransferContinuation::None);
         }
         let direct_peer = self
             .routing_peer(&destination.device.user_id())
@@ -3297,75 +3750,99 @@ impl Node {
             destination.receipt_eligible && context == DeliveryAttemptContext::RetainedRecovery;
         let started = std::time::Instant::now();
         let budget = super::route_timing::MAX_CONTROL_DEADLINE;
+        let direct_more = std::sync::atomic::AtomicBool::new(false);
+        let direct_limited = std::sync::atomic::AtomicBool::new(false);
         let direct = async {
             let mut held = false;
             let mut timed_out = false;
             if let Some(peer) = direct_peer {
-                let outcome = self
-                    .adaptive_control_timeout(&peer.public, async {
-                        let messages = async {
-                            let held = self
-                                .transfer_delivery_destination_with_admission(
-                                    &peer,
-                                    destination,
-                                    destination.event.conversation_id,
-                                    super::session_pool::AuthenticationAdmission::RouteProgress,
-                                )
-                                .await;
-                            self.emit_new_messages(destination.event.conversation_id);
-                            held
-                        };
-                        let receipts = || async {
-                            let control = super::delivery_receipt::delivery_conversation_id(
-                                &self.identity.public(),
-                                &peer.public,
-                            );
+                let outcome = Box::pin(self.adaptive_control_timeout(&peer.public, async {
+                    let messages = async {
+                        let held = self
+                            .transfer_delivery_destination_with_admission(
+                                &peer,
+                                destination,
+                                destination.event.conversation_id,
+                                super::session_pool::AuthenticationAdmission::RouteProgress,
+                                true,
+                            )
+                            .await;
+                        self.emit_new_messages(destination.event.conversation_id);
+                        if held.0 == TransferOutcome::More {
+                            direct_more.store(true, Ordering::Release);
+                        }
+                        if held.0 == TransferOutcome::Limited {
+                            direct_limited.store(true, Ordering::Release);
+                        }
+                        (held.0 == TransferOutcome::Held, held.1)
+                    };
+                    let receipts = || async {
+                        let control = super::delivery_receipt::delivery_conversation_id(
+                            &self.identity.public(),
+                            &peer.public,
+                        );
+                        let control_outcome =
                             Box::pin(self.transfer_delivery_destination_with_admission(
                                 &peer,
                                 destination,
                                 control,
                                 super::session_pool::AuthenticationAdmission::RouteProgress,
+                                false,
                             ))
                             .await;
-                            self.emit_new_messages(control);
-                        };
-                        if independent_receipts {
-                            // Existing receipt evidence must not wait behind
-                            // ordinary history, and new messages must not wait
-                            // behind receipt history. Both scopes remain owned
-                            // by this one deadline/cancellation boundary and
-                            // the shared TCP capacity. Only receipt validation
-                            // may retire this exact destination as delivered.
-                            let held = tokio::join!(Box::pin(messages), receipts()).0;
-                            if held
-                                && self
-                                    .delivery
-                                    .lock()
-                                    .expect("delivery lock not poisoned")
-                                    .contains_work_event(destination.event.id)
-                            {
-                                // The early independent control round can finish
-                                // empty before this first send creates a receipt.
-                                // Preserve the existing post-send control pull
-                                // inside this same bounded owner.
-                                receipts().await;
-                            }
-                            held
-                        } else {
-                            // Immediate flushes, own copies and receipt transfers
-                            // keep their payload-before-control exchange contract.
-                            let held = messages.await;
-                            if held {
-                                receipts().await;
-                            }
-                            held
+                        if control_outcome.0 == TransferOutcome::More {
+                            direct_more.store(true, Ordering::Release);
                         }
-                    })
-                    .await;
+                        if control_outcome.0 == TransferOutcome::Limited {
+                            direct_limited.store(true, Ordering::Release);
+                        }
+                        self.emit_new_messages(control);
+                    };
+                    if independent_receipts {
+                        // Existing receipt evidence must not wait behind
+                        // ordinary history, and new messages must not wait
+                        // behind receipt history. Both scopes remain owned
+                        // by this one deadline/cancellation boundary and
+                        // the shared TCP capacity. Only receipt validation
+                        // may retire this exact destination as delivered.
+                        tokio::pin!(messages);
+                        let early = receipts();
+                        tokio::pin!(early);
+                        let held = tokio::select! {
+                            result = &mut messages => {
+                                if !result.0 { early.await; }
+                                result.0
+                            }
+                            _ = &mut early => messages.await.0,
+                        };
+                        // Positive Have finishes the original-message phase.
+                        // The same bounded destination lane collects receipts
+                        // separately without reading/resending its ciphertext.
+                        if held {
+                            direct_more.store(true, Ordering::Release);
+                        }
+                        held
+                    } else {
+                        // Immediate flushes, own copies and receipt transfers
+                        // keep their payload-before-control exchange contract.
+                        let (held, followed) = messages.await;
+                        if held && !followed {
+                            receipts().await;
+                        }
+                        held
+                    }
+                }))
+                .await;
                 timed_out = outcome.is_none();
                 held = outcome.unwrap_or(false);
             }
-            (held, started.elapsed(), timed_out)
+            (
+                held,
+                started.elapsed(),
+                timed_out,
+                direct_more.load(Ordering::Acquire),
+                direct_limited.load(Ordering::Acquire),
+            )
         };
         let relay = async {
             let outcome =
@@ -3420,8 +3897,8 @@ impl Node {
         }
         // Dropping an unfinished alternative releases its socket and peer lane.
         // Custody or another destination's receipt leaves this event pending.
-        let (held, direct_elapsed, direct_timeout) =
-            direct_result.unwrap_or((false, started.elapsed(), false));
+        let (held, direct_elapsed, direct_timeout, more, limited) =
+            direct_result.unwrap_or((false, started.elapsed(), false, false, false));
         let (relay_held, relay_elapsed, relay_timeout) =
             relay_result.unwrap_or((false, started.elapsed(), false));
         if started.elapsed() >= std::time::Duration::from_secs(10) {
@@ -3431,15 +3908,31 @@ impl Node {
         }
         // This return value is remote storage evidence. The scheduling owner
         // separately checks whether durable destination work actually advanced.
+        if context != DeliveryAttemptContext::ReceiptRecovery && (held || relay_held) {
+            crate::transport::diagnostics::record_message(|metrics| {
+                metrics.direct_storage_holds =
+                    metrics.direct_storage_holds.saturating_add(u64::from(held));
+                metrics.relay_storage_holds = metrics
+                    .relay_storage_holds
+                    .saturating_add(u64::from(relay_held));
+            });
+        }
         let held = held || relay_held;
         (
             held,
-            if held {
+            if held || more || limited {
                 None
             } else if direct_timeout || relay_timeout {
                 Some(DeliveryRecoveryReason::AttemptTimedOut)
             } else {
                 reason
+            },
+            if more {
+                TransferContinuation::More
+            } else if limited {
+                TransferContinuation::Limited
+            } else {
+                TransferContinuation::None
             },
         )
     }
@@ -5104,13 +5597,36 @@ mod diagnostic_tests {
         let sending = Arc::clone(&sender);
         let task = controls.spawn(async move {
             let _attempt = attempt;
-            sending
+            let held = sending
                 .retry_one_destination_with_reason(
                     &destination,
                     super::DeliveryAttemptContext::RetainedRecovery,
                 )
                 .await
-                .0
+                .0;
+            if held {
+                let reference = super::super::delivery_store::DeliveryReference {
+                    device: destination.device.clone(),
+                    account: destination.account.clone(),
+                    event_id: destination.event.id,
+                    receipt_eligible: destination.receipt_eligible,
+                };
+                // Preserve this exact task/observation while driving the new
+                // receipt phase. No repeat original scope or source rescue.
+                while sending.delivery_status(logical) != Some(super::DeliveryStatus::Delivered) {
+                    let progress = sending
+                        .collect_destination_receipt(logical, &reference)
+                        .await;
+                    if progress != super::Reconciliation::More {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            // A signed receipt can retire this exact destination before the
+            // concurrent storage-confirmation branch returns. Both outcomes
+            // represent progress; custody alone still cannot mark Delivered.
+            held || sending.delivery_status(logical) == Some(super::DeliveryStatus::Delivered)
         });
         let healthy_task = task.id();
         owners.insert(healthy.clone(), task);
@@ -5237,7 +5753,21 @@ mod diagnostic_tests {
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public
         );
-        node.record_relay_attempt(&fastest.public, false);
+        for error in [
+            crate::node::session::SessionError::ResourceUnavailable,
+            crate::node::session::SessionError::Store(crate::eventlog::LogError::StaleCursor),
+        ] {
+            assert!(!node.record_relay_attempt_result(&fastest.public, Err(&error)));
+            assert!(node.relay_retry_due(&fastest.public));
+            assert_eq!(
+                node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+                fastest.public
+            );
+        }
+        let failure = crate::node::session::SessionError::Transport(
+            crate::transport::TransportError::Io(std::io::ErrorKind::ConnectionRefused.into()),
+        );
+        assert!(!node.record_relay_attempt_result(&fastest.public, Err(&failure)));
         assert_ne!(
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public
@@ -5247,6 +5777,64 @@ mod diagnostic_tests {
             node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
             fastest.public
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_relay_rank_balances_origin_distance_and_responsiveness() {
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Remote sender",
+            5000,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let near = DeviceIdentity::generate();
+        let far = DeviceIdentity::generate();
+        let near_addr = "127.0.0.1:5001".parse().unwrap();
+        let far_addr = "127.0.0.1:5002".parse().unwrap();
+        let mut roster = crate::discovery::roster::Roster::default();
+        for (relay, addr, hops) in [(&near, near_addr, 0), (&far, far_addr, 2)] {
+            let addr: std::net::SocketAddr = addr;
+            roster.update(
+                &Announce::new_post_office(relay, "Relay", addr.port()),
+                addr.ip(),
+                &node.user_id(),
+            );
+            roster.update_relayed(&peer, addr, &node.user_id());
+            roster.set_directory_expiry(
+                &peer.user_id,
+                addr,
+                std::time::Instant::now() + Duration::from_secs(15),
+                1,
+            );
+            roster.set_directory_origin_hops(&peer.user_id, addr, 1, Some(hops));
+        }
+
+        let first = || {
+            node.post_office_candidates_for(&roster, &peer.public())[0]
+                .public
+                .clone()
+        };
+        assert_eq!(first(), near.public());
+
+        node.sessions
+            .control_succeeded(&near.public(), near_addr, Duration::from_millis(400));
+        node.sessions
+            .control_succeeded(&far.public(), far_addr, Duration::from_millis(20));
+        assert_eq!(first(), far.public());
+
+        node.sessions.control_timed_out(&far.public(), far_addr);
+        assert_eq!(first(), near.public());
     }
 
     #[tokio::test]
@@ -6368,19 +6956,24 @@ mod requester_reception_tests {
             let receiving = target.clone();
             target.replace_verified_dm_pull_peers(vec![source_proof.user_id.clone()]);
             let request = tokio::spawn(async move {
-                match mode {
-                    0 => {
-                        receiving
-                            .transfer_delivery_destination(&peer, &destination, conversation)
-                            .await
-                    }
-                    1 => receiving.deliver_direct(&peer, conversation).await.is_ok(),
-                    _ => {
-                        receiving
-                            .pull_delivery_scope(&source_proof, conversation, false)
-                            .await
-                            != Reconciliation::Deferred
-                    }
+                loop {
+                    match mode {
+                        0 => {
+                            receiving
+                                .transfer_delivery_destination(&peer, &destination, conversation)
+                                .await
+                        }
+                        1 => receiving.deliver_direct(&peer, conversation).await.is_ok(),
+                        _ => {
+                            receiving
+                                .pull_delivery_scope(&source_proof, conversation, false)
+                                .await
+                                != Reconciliation::Deferred
+                        }
+                    };
+                    // The cancellation boundary is actual ciphertext admission,
+                    // not the completion of one possibly deferred range turn.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), ready)
@@ -6434,5 +7027,139 @@ mod requester_reception_tests {
                     .unwrap()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_sync_retry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn control_budget_includes_the_authenticated_preferred_fallback() {
+        use crate::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let route = "127.0.0.1:42".parse().unwrap();
+        let before = node.control_budget(&peer.public());
+        node.preferred_routes
+            .lock()
+            .unwrap()
+            .insert(peer.user_id(), route);
+        node.sessions
+            .control_succeeded(&peer.public(), route, std::time::Duration::from_secs(12));
+        let measured = node.sessions.control_timeout(&peer.public(), route);
+        assert!(measured > before);
+        assert_eq!(node.control_budget(&peer.public()), measured);
+        assert!(measured <= super::super::route_timing::MAX_CONTROL_DEADLINE);
+    }
+
+    #[test]
+    fn limited_sync_parks_without_claiming_quiet_or_delivery() {
+        let now = std::time::Instant::now();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        Reconciliation::Limited.schedule(&mut retries, "peer", (), now);
+        assert!(!retries.ready(&"peer", &(), now + std::time::Duration::from_secs(1)));
+        assert!(retries.ready(&"peer", &(), now + QUIET_REPAIR_INTERVAL));
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::Limited),
+            Reconciliation::Limited
+        );
+        assert_eq!(
+            Reconciliation::Limited.combine(Reconciliation::Quiet),
+            Reconciliation::Limited
+        );
+        assert_eq!(
+            Reconciliation::Limited.combine(Reconciliation::More),
+            Reconciliation::More
+        );
+    }
+    #[test]
+    fn quiet_destination_keeps_exact_receipt_sparse_without_parking_new_event() {
+        let now = std::time::Instant::now();
+        let peer = crate::identity::device::DeviceIdentity::generate().public();
+        let old = ControlWork::Destination(EventId::new([1; 32]));
+        let new = ControlWork::Destination(EventId::new([2; 32]));
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let mut receipt_polls = super::super::delivery_retry::RetrySchedule::default();
+        let old_hint = ([1; 32], peer.ed25519_pub, peer.x25519_pub);
+        receipt_polls.settled(old_hint, (), QUIET_REPAIR_INTERVAL, now);
+        Reconciliation::Quiet.schedule_destination_peer(
+            &mut retries,
+            old.retry_key(&peer),
+            (),
+            now,
+        );
+        assert!(!receipt_polls.ready(&old_hint, &(), now));
+        assert!(retries.ready(&new.retry_key(&peer), &(), now));
+        // An actual failure still paces all destinations on this peer lane.
+        Reconciliation::Deferred.schedule_destination_peer(
+            &mut retries,
+            old.retry_key(&peer),
+            (),
+            now,
+        );
+        assert!(!retries.ready(&new.retry_key(&peer), &(), now));
+        assert!(!receipt_polls.ready(&old_hint, &(), now));
+    }
+    #[test]
+    fn incomplete_receipt_is_continuation_without_custody() {
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::More),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(true, false, TransferContinuation::More),
+            Reconciliation::Advanced
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(false, true, TransferContinuation::More),
+            Reconciliation::Deferred
+        );
+        assert_eq!(
+            Reconciliation::receipt_result(false, false, TransferContinuation::None),
+            Reconciliation::Deferred
+        );
+    }
+    #[test]
+    fn bounded_sync_continuation_resets_failure_backoff_without_claiming_delivery() {
+        let now = std::time::Instant::now();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        for _ in 0..8 {
+            Reconciliation::Deferred.schedule(&mut retries, "peer", (), now);
+        }
+        Reconciliation::More.schedule(&mut retries, "peer", (), now);
+        assert!(retries.ready(&"peer", &(), now));
+        for paced in [
+            Reconciliation::Limited,
+            Reconciliation::Quiet,
+            Reconciliation::Deferred,
+        ] {
+            paced.schedule(&mut retries, "peer", (), now);
+            assert!(!retries.ready(&"peer", &(), now));
+            Reconciliation::More.schedule(&mut retries, "peer", (), now);
+            assert!(retries.ready(&"peer", &(), now));
+        }
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Quiet),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Deferred),
+            Reconciliation::More
+        );
+        assert_eq!(
+            Reconciliation::More.combine(Reconciliation::Advanced),
+            Reconciliation::Advanced
+        );
     }
 }

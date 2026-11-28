@@ -3594,7 +3594,7 @@ impl Node {
                     // exact source before claiming readiness or opening a peer.
                     if let Err(error) = node.prepare_account_group_fanout(group).await {
                         log::debug!("account group fanout preparation deferred: {error}");
-                        return (group, true);
+                        return (group, super::channels::FanoutProgress::Deferred);
                     }
                     #[cfg(test)]
                     if let Err(error) = node
@@ -3608,7 +3608,7 @@ impl Node {
                         .await
                     {
                         log::debug!("account control publication worker deferred: {error}");
-                        return (group, true);
+                        return (group, super::channels::FanoutProgress::Deferred);
                     }
                     let members = node.channel_members(group);
                     let deferred = node.distribute_account_group_effects(group, &members).await;
@@ -3970,13 +3970,13 @@ impl Node {
                         },
                         Some(Err(error)) => {
                             log::debug!("account control fanout worker terminated: {error}");
-                            fanout_owners.remove(&error.id()).map(|group| (group, true))
+                            fanout_owners.remove(&error.id()).map(|group| (group, super::channels::FanoutProgress::Deferred))
                         }
                         None => None,
                     };
                     if let Some((group, deferred)) = completion {
-                        if deferred {
-                            if !fanout.defer(group)
+                        if deferred != super::channels::FanoutProgress::Complete {
+                            if !fanout.defer_progress(group, deferred)
                                 && let Some(sequence) = self.account_group_fanout_sequence(group)
                             {
                                 fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
@@ -4293,7 +4293,7 @@ impl Node {
                         attachment_owners.remove(&task);
                         active_attachments.remove(&id);
                         let generation = sibling_attachment_generations.remove(&task);
-                        if generation.is_some() && !sibling_attachments.get(&id).is_some_and(|selection| Some(selection.generation) == generation) {
+                        if generation.is_some() && sibling_attachments.get(&id).is_none_or(|selection| Some(selection.generation) != generation) {
                             #[cfg(test)]
                             let pending_before = self.account_sync_status.lock().unwrap()
                                 .get(&id).map(|status| status.pending_attachments);

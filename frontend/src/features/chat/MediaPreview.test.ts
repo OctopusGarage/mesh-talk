@@ -19,6 +19,8 @@ const state = vi.hoisted(() => ({
   failPreview: false,
   previewError: null as null | (() => void),
   setError: vi.fn(),
+  openChat: vi.fn(),
+  openUrl: vi.fn().mockResolvedValue(undefined),
   writeText: vi.fn(async (_text: string) => {}),
   writeSelection: vi.fn((_type: string, _value: string) => {}),
 }));
@@ -52,11 +54,27 @@ vi.mock("@/lib/motion", () => ({
 }));
 vi.mock("@/lib/attachmentSave", () => ({ saveAttachment: vi.fn() }));
 vi.mock("@/lib/savedDownloads", () => ({ useSavedDownloads: () => ({}) }));
-vi.mock("@/store/chat", () => ({
-  useChat: (select: (value: { setError: typeof state.setError }) => unknown) =>
-    select({ setError: state.setError }),
-  captureChatOwnership: () => ({ current: () => state.current }),
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: state.openUrl,
+  revealItemInDir: vi.fn(),
 }));
+vi.mock("@/store/chat", () => {
+  const chat = {
+    setError: state.setError,
+    open: state.openChat,
+    peers: [],
+    myAccountId: "a".repeat(32),
+    accounts: [],
+    favorites: {},
+  };
+  return {
+    useChat: Object.assign(
+      (select: (value: typeof chat) => unknown) => select(chat),
+      { getState: () => chat },
+    ),
+    captureChatOwnership: () => ({ current: () => state.current }),
+  };
+});
 vi.mock("@/store/settings", () => ({
   useSettings: {
     getState: () => ({
@@ -178,6 +196,80 @@ async function openImage() {
     '[data-testid="file-image-lightbox"] img',
   )!;
 }
+
+it.each([
+  ["https://example.com/path", "files.qrOpenLink"],
+  ["a".repeat(32), "files.qrOpenChat"],
+  ["b".repeat(32), null],
+  ["javascript:alert(1)", null],
+  [null, null],
+])(
+  "recognizes %s only on demand and gates navigation on action",
+  async (payload, action) => {
+    state.openUrl.mockClear();
+    state.openChat.mockClear();
+    let respond: ((event: MessageEvent<string | null>) => void) | undefined;
+    const terminate = vi.fn();
+    const startWorker = vi.fn();
+    vi.stubGlobal(
+      "Image",
+      class {
+        naturalWidth = 100;
+        naturalHeight = 100;
+        async decode() {}
+      },
+    );
+    vi.stubGlobal(
+      "Worker",
+      class {
+        onmessage?: (event: MessageEvent<string | null>) => void;
+        terminate = terminate;
+        constructor() {
+          startWorker();
+        }
+        postMessage() {
+          respond = this.onmessage;
+        }
+      },
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      fillRect: vi.fn(),
+      drawImage: vi.fn(),
+      getImageData: () => ({ data: new Uint8ClampedArray(40_000) }),
+    } as unknown as CanvasRenderingContext2D);
+    await openImage();
+    expect(startWorker).not.toHaveBeenCalled();
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="files.recognizeQr"]',
+        )!
+        .click(),
+    );
+    expect(startWorker).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      respond?.(new MessageEvent("message", { data: payload })),
+    );
+    expect(terminate).toHaveBeenCalledTimes(1);
+    const result = host.querySelector(
+      'section[aria-label="files.recognizeQr"]',
+    )!;
+    expect(result.textContent).toContain(payload ?? "files.qrNotFound");
+    expect(state.openUrl).not.toHaveBeenCalled();
+    expect(state.openChat).not.toHaveBeenCalled();
+    const actions = Array.from(result.querySelectorAll("button"));
+    expect(actions.map((button) => button.textContent)).toEqual(
+      action ? ["common.close", action] : ["common.close"],
+    );
+    if (action) await act(async () => actions[1].click());
+    if (action === "files.qrOpenLink")
+      expect(state.openUrl).toHaveBeenCalledWith(payload);
+    if (action === "files.qrOpenChat")
+      expect(state.openChat).toHaveBeenCalledWith(
+        expect.objectContaining({ id: payload }),
+      );
+  },
+);
 
 it("keeps the preparing state until the received image can actually display", async () => {
   state.url = null;

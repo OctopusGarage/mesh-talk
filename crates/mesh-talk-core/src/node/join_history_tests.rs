@@ -804,9 +804,62 @@ async fn join_history_expiry_and_recall_are_rechecked_before_key_release() {
     );
 }
 
+fn history_recovery_snapshot(node: &Node, channel: ConversationId) -> String {
+    let counts = {
+        let log = node.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        [
+            EventKind::ChannelJoinHistory,
+            EventKind::ChannelDeviceInheritance,
+        ]
+        .map(|kind| repository.count_kind(&channel, kind))
+    };
+    // Observe existing readiness seams without advancing a producer.
+    // These are separate snapshots: recovery may change between reads.
+    let source = node
+        .channel_checkpoints
+        .source_binding(channel)
+        .map(|source| {
+            source.map(|source| {
+                (
+                    hex::encode(source.job),
+                    source.revision,
+                    node.channel_checkpoints.control_stamp(&source),
+                )
+            })
+        });
+    let current_membership = node
+        .channel_checkpoints
+        .current_state(channel)
+        .map(|state| {
+            state.map(|state| {
+                (
+                    state.is_accepted_member(&node.user_id()),
+                    state.is_dissolved(),
+                )
+            })
+        });
+    let projection_ready = node
+        .channel_checkpoints
+        .published_projection(channel)
+        .map(|projection| projection.is_some());
+    let history_read_ready = node.channel_checkpoints.history_read_ready(channel);
+    let history_policy = node.channel_checkpoints.prepared_history_policy(channel);
+    let plaintext_pending = node.channel_plaintext_pending_for_test(channel);
+    // The existing seam combines receive/send maps; it cannot identify
+    // which private continuation remains or its current command.
+    let local_history_idle = node.join_history_work.lock().unwrap().is_idle();
+    let runtime_ticket = node.channel_checkpoints.next_runtime(None);
+    let session_capacity = node.sessions.test_capacity_snapshot();
+    format!(
+        "signed_history_counts={counts:?} local_history_idle={local_history_idle} runtime_ticket={runtime_ticket:?} session_capacity={session_capacity:?} source={source:?} current_membership={current_membership:?} projection_ready={projection_ready:?} history_read_ready={history_read_ready:?} history_policy={history_policy:?} plaintext_pending={plaintext_pending}"
+    )
+}
+
 #[tokio::test]
 async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance() {
     use crate::discovery::Announce;
+    use futures_util::FutureExt;
     use std::net::{IpAddr, Ipv4Addr};
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -848,142 +901,163 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         &bob.user_id(),
     );
-    let a_task = tokio::spawn(Arc::clone(&alice).run_accept_loop(a_listener));
-    let b_task = tokio::spawn(Arc::clone(&bob).run_accept_loop(b_listener));
-    let channel = alice
-        .create_channel_invited("history", vec![])
-        .await
-        .unwrap();
-    alice
-        .send_channel_message(channel, b"earlier over loopback")
-        .await
-        .unwrap();
-    let mut protected_ids = Vec::new();
-    let image = a.path().join("private-image.png");
-    std::fs::write(&image, b"\x89PNG\r\n\x1a\nprivate image pixels").unwrap();
-    for protection in [
-        super::super::MessageProtection::Click,
-        super::super::MessageProtection::Authenticate,
-    ] {
-        protected_ids.push(
-            alice
-                .enqueue_protected_channel_message_reply_expiring_if(
+    let mut a_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        alice.clone(),
+        a_listener,
+    )
+    .await;
+    let mut b_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        bob.clone(),
+        b_listener,
+    )
+    .await;
+    a_host.launch();
+    b_host.launch();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let channel = alice
+            .create_channel_invited("history", vec![])
+            .await
+            .unwrap();
+        alice
+            .send_channel_message(channel, b"earlier over loopback")
+            .await
+            .unwrap();
+        let mut protected_ids = Vec::new();
+        let image = a.path().join("private-image.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nprivate image pixels").unwrap();
+        for protection in [
+            super::super::MessageProtection::Click,
+            super::super::MessageProtection::Authenticate,
+        ] {
+            protected_ids.push(
+                alice
+                    .enqueue_protected_channel_message_reply_expiring_if(
+                        channel,
+                        b"private history text",
+                        None,
+                        None,
+                        protection,
+                        |commit| commit(),
+                    )
+                    .unwrap(),
+            );
+            let (id, _) = alice
+                .enqueue_protected_file_channel_progress_expiring_if(
                     channel,
-                    b"private history text",
-                    None,
+                    &image,
+                    crate::file::FileKind::Media,
+                    |_| {},
                     None,
                     protection,
                     |commit| commit(),
                 )
-                .unwrap(),
-        );
-        let (id, _) = alice
-            .enqueue_protected_file_channel_progress_expiring_if(
-                channel,
-                &image,
-                crate::file::FileKind::Media,
-                |_| {},
-                None,
-                protection,
-                |commit| commit(),
-            )
+                .await
+                .unwrap();
+            protected_ids.push(id);
+        }
+        alice
+            .add_channel_member(channel, bob.identity.public())
             .await
             .unwrap();
-        protected_ids.push(id);
-    }
-    alice
-        .add_channel_member(channel, bob.identity.public())
-        .await
-        .unwrap();
-    {
-        let log = alice.log.lock().unwrap();
-        let events = log.events(&channel).unwrap();
-        let view = View::new(&events.iter().collect::<Vec<_>>());
-        let offers = view.offers();
-        assert_eq!(offers.len(), 1);
-        assert_eq!(
-            offers[0].1.rows.len(),
-            1,
-            "only ordinary text enters the encrypted offer"
-        );
+        crate::node::test_support::complete_group_fanout(&alice, channel, &[&bob]).await;
+        {
+            let log = alice.log.lock().unwrap();
+            let events = log.events(&channel).unwrap();
+            let view = View::new(&events.iter().collect::<Vec<_>>());
+            let offers = view.offers();
+            assert_eq!(offers.len(), 1);
+            assert_eq!(
+                offers[0].1.rows.len(),
+                1,
+                "only ordinary text enters the encrypted offer"
+            );
+            assert!(
+                offers[0]
+                    .1
+                    .rows
+                    .iter()
+                    .all(|row| !protected_ids.contains(&row.id))
+            );
+        }
+        assert!(bob.channel_history(channel, 10).unwrap().is_empty());
+        let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let phase_started = std::time::Instant::now();
+        for (label, node) in [("alice", &alice), ("bob", &bob)] {
+            let phases = phases.clone();
+            *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+                if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
+                    return;
+                }
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 256 {
+                    phases.pop_front();
+                }
+                phases.push_back((
+                    phase_started.elapsed().as_millis(),
+                    label,
+                    peer.user_id(),
+                    tokio::task::try_id(),
+                    phase,
+                ));
+            }));
+        }
+        bob.accept_channel_invite(channel).await.unwrap();
+        alice.retry_channel_controls().await;
+        let receive_started = phase_started.elapsed();
+        // This loopback checks complete silent/protected history semantics. Use
+        // the functional fixture watchdog independently of each exchange deadline;
+        // dedicated notification-driven gossip keeps its latency assertion.
+        let receive_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Baseline and timeout snapshots distinguish a changed source from an
+        // unchanged pending phase. Keep observation inside the original watchdog.
+        let initial_state = [
+            history_recovery_snapshot(&alice, channel),
+            history_recovery_snapshot(&bob, channel),
+        ];
+        let result = tokio::time::timeout_at(receive_deadline, received.recv()).await;
+        for node in [&alice, &bob] {
+            *node.account_client_test_hook.lock().unwrap() = None;
+        }
+        if result.is_err() {
+            for ((label, node), initial) in [("alice", &alice), ("bob", &bob)]
+                .into_iter()
+                .zip(initial_state)
+            {
+                eprintln!(
+                    "join recovery {label}: initial={initial} final={}",
+                    history_recovery_snapshot(node, channel)
+                );
+            }
+            eprintln!(
+                "join recovery receive_started={receive_started:?} bounded phases={:?}",
+                phases.lock().unwrap(),
+            );
+        }
+        let message = result.unwrap().unwrap();
+        assert_eq!(message.text, b"earlier over loopback");
+        assert_eq!(message.arrival_kind, "history_sync");
+        let history = bob.channel_history(channel, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, message.event_id);
+        assert_eq!(history[0].protection, None);
+        assert_eq!(message.protection, None);
+        assert!(history.iter().all(|row| !protected_ids.contains(&row.id)));
         assert!(
-            offers[0]
-                .1
-                .rows
-                .iter()
-                .all(|row| !protected_ids.contains(&row.id))
+            received.try_recv().is_err(),
+            "protected snapshots never surface as ordinary messages"
         );
-    }
-    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
-    let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let phase_started = std::time::Instant::now();
-    for (label, node) in [("alice", &alice), ("bob", &bob)] {
-        let phases = phases.clone();
-        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
-            if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
-                return;
-            }
-            let mut phases = phases.lock().unwrap();
-            if phases.len() == 256 {
-                phases.pop_front();
-            }
-            phases.push_back((
-                phase_started.elapsed().as_millis(),
-                label,
-                peer.user_id(),
-                tokio::task::try_id(),
-                phase,
-            ));
-        }));
-    }
-    bob.accept_channel_invite(channel).await.unwrap();
-    alice.retry_channel_controls().await;
-    let receive_started = phase_started.elapsed();
-    // This loopback checks complete silent/protected history semantics. Use
-    // the functional fixture watchdog independently of each exchange deadline;
-    // dedicated notification-driven gossip keeps its latency assertion.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), received.recv()).await;
+    })
+    .catch_unwind()
+    .await;
+    // Join actual hosts and admitted work before either profile directory drops,
+    // including after a failed observation or an assertion panic.
     for node in [&alice, &bob] {
         *node.account_client_test_hook.lock().unwrap() = None;
     }
-    if result.is_err() {
-        for (label, node) in [("alice", &alice), ("bob", &bob)] {
-            let counts = {
-                let log = node.log.lock().unwrap();
-                let repository = log.repository().unwrap();
-                [
-                    EventKind::ChannelJoinHistory,
-                    EventKind::ChannelDeviceInheritance,
-                ]
-                .map(|kind| repository.count_kind(&channel, kind))
-            };
-            eprintln!(
-                "join recovery {label}: signed_history_counts={counts:?} local_history_idle={} runtime_ticket={:?} session_capacity={:?}",
-                node.join_history_work.lock().unwrap().is_idle(),
-                node.channel_checkpoints.next_runtime(None),
-                node.sessions.test_capacity_snapshot(),
-            );
-        }
-        eprintln!(
-            "join recovery receive_started={receive_started:?} bounded phases={:?}",
-            phases.lock().unwrap(),
-        );
+    tokio::join!(a_host.stop(), b_host.stop());
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
-    let message = result.unwrap().unwrap();
-    assert_eq!(message.text, b"earlier over loopback");
-    assert_eq!(message.arrival_kind, "history_sync");
-    let history = bob.channel_history(channel, 10).unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].id, message.event_id);
-    assert_eq!(history[0].protection, None);
-    assert_eq!(message.protection, None);
-    assert!(history.iter().all(|row| !protected_ids.contains(&row.id)));
-    assert!(
-        received.try_recv().is_err(),
-        "protected snapshots never surface as ordinary messages"
-    );
-    a_task.abort();
-    b_task.abort();
 }
 
 #[tokio::test]
